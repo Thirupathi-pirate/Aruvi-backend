@@ -1,0 +1,13 @@
+.env
+backend/.env
+__pycache__/
+*.pyc
+*.pyo
+data/
+session/
+*.session
+*.db
+*.db-shm
+*.db-wal
+opencode
+cloudflared

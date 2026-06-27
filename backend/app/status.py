@@ -224,7 +224,7 @@ def get_ram() -> dict:
     now = time.monotonic()
     if cur is not None and mx is not None and cur > 0.8 * mx and now - _last_oom_clear > _OOM_CLEAR_COOLDOWN:
         _last_oom_clear = now
-        active = {(info["chat_id"], mid) for mid, info in _forward_streams.items()}
+        active = {(info["chat_id"], mid) for mid, info in list(_forward_streams.items())}
         freed = _cache_manager.clear_all(exclude_keys=active)
         kept = len(active)
         logger.warning("OOM guard: cleared %.1f MB from cache (%d streams preserved)", freed / 1024 / 1024, kept)

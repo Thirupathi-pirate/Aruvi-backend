@@ -28,7 +28,10 @@ def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
 
 def _dc_get(chat_id: int, message_id: int, chunk_idx: int) -> bytes | None:
     p = _dc_path(chat_id, message_id, chunk_idx)
-    return Path(p).read_bytes() if os.path.isfile(p) else None
+    try:
+        return Path(p).read_bytes()
+    except (FileNotFoundError, IsADirectoryError, PermissionError):
+        return None
 
 
 def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
@@ -270,12 +273,13 @@ def get_forward_snapshot() -> list[dict]:
     # Prune stale entries (>8h since last update)
     now = time.monotonic()
     for mid in list(_forward_streams.keys()):
-        if now - _forward_streams[mid].get("updated_at", 0) > 8 * 3600:
+        entry = _forward_streams.get(mid)
+        if entry and now - entry.get("updated_at", 0) > 8 * 3600:
             _forward_streams.pop(mid, None)
     result = []
     for mid, info in list(_forward_streams.items()):
         futures = info.get("results", {})
-        done = sum(1 for f in futures.values() if f.done())
+        done = sum(1 for f in list(futures.values()) if f.done())
         result.append({
             "message_id": mid,
             "chat_id": info["chat_id"],
@@ -386,6 +390,7 @@ async def _retry_chunk_with_alt_client(
             logger.debug("Retry cycle %d: sleeping %ds before next attempt", cycle, delay)
             await asyncio.sleep(delay)
     if not results[chunk_idx].done():
+        logger.error("All retries exhausted for chunk %d — inserting empty bytes", chunk_idx)
         results[chunk_idx].set_result(b"")
 
 
@@ -404,6 +409,9 @@ async def parallel_stream_generator(
     pool_size = len(clients)
     if concurrency is None:
         concurrency = max(1, sum(1 for c in clients if c.is_connected))
+
+    if not any(c.is_connected for c in clients):
+        raise ConnectionError("No Telegram clients are connected")
 
     start_chunk = offset // chunk_size
     end_chunk = (offset + length - 1) // chunk_size
@@ -459,15 +467,20 @@ async def parallel_stream_generator(
         of the same file benefit before the yield loop."""
         t0 = time.perf_counter()
         current = batch_start
-        async with sem:
-            async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
-                if current > batch_end:
-                    break
-                data = bytes(part)
-                video_cache.store(current, data)
-                if not results[current].done():
-                    results[current].set_result(data)
-                current += 1
+        try:
+            async with sem:
+                async with asyncio.timeout(60):
+                    async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
+                        if current > batch_end:
+                            break
+                        data = bytes(part)
+                        video_cache.store(current, data)
+                        if not results[current].done():
+                            results[current].set_result(data)
+                        current += 1
+        except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+            logger.warning("Bot %d batch %d-%d aborted: %s", getattr(cl, 'pool_index', '?'), batch_start, batch_end, e)
+            return False
         elapsed = time.perf_counter() - t0
         if elapsed > 2.5:
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
@@ -640,19 +653,21 @@ async def parallel_stream_generator(
             yield chunk_data
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
-                if message_id in _forward_streams:
-                    _forward_streams[message_id]["updated_at"] = time.monotonic()
+                entry = _forward_streams.get(message_id)
+                if entry:
+                    entry["updated_at"] = time.monotonic()
             del results[chunk_idx]
     finally:
         _forward_streams.pop(message_id, None)
-        _dc_remove(chat_id, message_id)
-        elapsed = time.perf_counter() - stream_start
-        cinfo = video_cache.info
-        _cache_manager.remove(chat_id, message_id)
-        logger.info("Done: %d ch, %.1f MB, %.1fs", total_chunks, bytes_yielded / 1024 / 1024, elapsed)
-        logger.info("Cache hits/evicts: %d/%d", cinfo["hits"], cinfo["evictions"])
         for w in worker_tasks:
             w.cancel()
+        _dc_remove(chat_id, message_id)
+        _cache_manager.remove(chat_id, message_id)
+        elapsed = time.perf_counter() - stream_start
+        if total_chunks:
+            logger.info("Done: %d ch, %.1f MB, %.1fs", total_chunks, bytes_yielded / 1024 / 1024, elapsed)
+            cinfo = video_cache.info
+            logger.info("Cache hits/evicts: %d/%d", cinfo["hits"], cinfo["evictions"])
 
 
 async def stream_file(

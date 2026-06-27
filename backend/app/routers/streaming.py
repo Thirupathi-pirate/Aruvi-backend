@@ -25,14 +25,21 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
     """Parse HTTP Range header for video seeking support."""
     if not range_header:
         return 0, file_size - 1
-    
+
+    # Suffix range: bytes=-500 (last N bytes)
+    suffix_match = re.match(r'bytes=-(\d+)', range_header)
+    if suffix_match:
+        suffix_len = int(suffix_match.group(1))
+        start = max(0, file_size - suffix_len)
+        return start, file_size - 1
+
     match = re.match(r'bytes=(\d+)-(\d*)', range_header)
     if not match:
         return 0, file_size - 1
-    
+
     start = int(match.group(1))
     end = int(match.group(2)) if match.group(2) else file_size - 1
-    
+
     return start, min(end, file_size - 1)
 
 
@@ -86,8 +93,10 @@ async def stream_file(
                     yield chunk
         except asyncio.TimeoutError:
             logger.warning("Stream timed out after 300s for file %d", file_id)
+            raise
         except Exception as e:
             logger.error("Stream failed for file %d: %s", file_id, e)
+            raise
     
     # Determine content disposition
     mime_type = file.mime_type or "application/octet-stream"
@@ -242,8 +251,10 @@ async def stream_public_file(
                     yield chunk
         except asyncio.TimeoutError:
             logger.warning("Public stream timed out after 300s for hash %s", public_hash)
+            raise
         except Exception as e:
             logger.error("Public stream failed for hash %s: %s", public_hash, e)
+            raise
     
     # Determine content disposition
     mime_type = file.mime_type or "application/octet-stream"

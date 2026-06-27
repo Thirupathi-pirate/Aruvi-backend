@@ -10,7 +10,7 @@ import string
 import traceback
 from datetime import datetime, timedelta, timezone
 from pyrogram import filters
-from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
+from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func, update
 
 from .telegram import tg_client, forward_to_storage_channel, invalidate_message_cache
@@ -94,12 +94,13 @@ async def get_or_create_user(telegram_id: int, username: str = None,
 
 
 def get_web_app_button(telegram_id: int, text: str = "🌐 Open Web") -> InlineKeyboardButton:
-    """Create a URL button with authenticated link."""
+    """Create a URL button with authenticated link. Uses a regular URL button
+    instead of WebApp because the domain is not registered with BotFather."""
     from urllib.parse import quote
     token = create_access_token(telegram_id)
     encoded_token = quote(token, safe='')
     web_url = f"{settings.web_base_url}/auth?token={encoded_token}"
-    return InlineKeyboardButton(text, web_app=WebAppInfo(url=web_url))
+    return InlineKeyboardButton(text, url=web_url)
 
 # ============== Authorization Middleware ==============
 

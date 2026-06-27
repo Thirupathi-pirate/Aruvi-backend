@@ -64,8 +64,8 @@ class Settings(BaseSettings):
 
     telegram_storage_channel_id: int
 
-    # Database
-    database_url: str = "sqlite:///./data/teleplay.db"
+    # Database (default: Supabase PostgreSQL)
+    database_url: str = "postgresql+asyncpg://postgres.nphhqhlfjuixeebqtmvb:aarsha7736740245%40@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
 
     # JWT — set JWT_SECRET for persistent sessions across restarts
     # Generate with: openssl rand -hex 32
@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     telegram_proxy_enabled: bool = False
 
     # Web
-    web_base_url: str = "http://localhost:3000"
+    web_base_url: str = "https://aaruvi.aaruvi.space"
 
     model_config = SettingsConfigDict(
         env_file=".env",

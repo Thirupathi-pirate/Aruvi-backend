@@ -150,10 +150,29 @@ async def start_telegram_client():
 
 
 async def _finish_startup():
-    """Start helper bots in parallel (no warmup — bots warm themselves on first real request)."""
+    """Start helper bots in parallel, then verify storage channel access."""
     if len(clients) > 1:
         tasks = [start_one_client(i, c) for i, c in enumerate(clients[1:], 1)]
         await asyncio.gather(*tasks)
+
+    # Verify each bot can access the storage channel
+    channel_id = settings.telegram_storage_channel_id
+    if channel_id:
+        for i, c in enumerate(clients):
+            if not c.is_connected:
+                diag_log(f"Client {i}: skipped channel check (not connected)")
+                continue
+            try:
+                me = await c.get_me()
+                msg = await c.get_messages(channel_id, 1)
+                if msg:
+                    diag_log(f"Client {i} (@{me.username}): channel access OK")
+                else:
+                    diag_log(f"Client {i} (@{me.username}): channel returned empty — add bot as admin")
+            except Exception as e:
+                diag_log(f"Client {i} (@{me.username}): CHANNEL_INVALID — add this bot as admin to channel {channel_id}")
+                diag_log(f"  Bot token starts with: {getattr(c, 'bot_token', '?')[:8]}...")
+                diag_log(f"  Error: {e}")
 
 
 async def stop_telegram_client():

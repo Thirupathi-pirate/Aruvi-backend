@@ -1,5 +1,7 @@
 .env
 backend/.env
+code/.env
+code/repo/
 __pycache__/
 *.pyc
 *.pyo

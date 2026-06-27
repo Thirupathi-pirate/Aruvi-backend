@@ -2,14 +2,25 @@
 
 ## Entrypoint
 
-`run.py` at repo root — HidenCloud runs `python /home/container/${PY_FILE}` with `PY_FILE=run.py`.
+`run.py` at repo root delegates to `code/run.py`.
 
-1. Copies root `.env` → `backend/.env`
-2. Runs `pip install -r backend/requirements.txt`
-3. Downloads `cloudflared-linux-arm64` and starts tunnel with `TUNNEL_TOKEN`
-4. Installs opencode (if missing) via `curl -fsSL https://opencode.ai/install | bash`, starts `opencode web --hostname 127.0.0.1 --port 7444`
-5. Threaded: TelePlay uvicorn on `127.0.0.1:7446`
-6. Threaded: Monitor (status.html proxy) on `127.0.0.1:7442`
+HidenCloud runs `python /home/container/${PY_FILE}` with `PY_FILE=run.py`.
+
+### Bootstrap (`code/run.py`)
+
+Two files stay on HidenCloud permanently:
+- `code/run.py` — bootstrap script
+- `code/.env` — secrets (gitignored)
+
+On each restart:
+1. Clones/pulls `github.com/Thirupathi-pirate/Aruvi-backend` into `code/repo/`
+2. Copies `code/.env` into the cloned repo
+3. `pip install` requirements
+4. Downloads `cloudflared-linux-arm64` and starts tunnel with `TUNNEL_TOKEN`
+5. Downloads `opencode-linux-arm64` (via urllib) and starts `opencode web --hostname 127.0.0.1 --port 7444`
+6. Threaded: TelePlay uvicorn on `127.0.0.1:7446`
+7. Threaded: Monitor (status.html proxy) on `127.0.0.1:7442`
+8. Blocks until 3:30 AM IST, then `os._exit(0)` for fresh IP
 
 ## Domain routing (Cloudflare Tunnel)
 

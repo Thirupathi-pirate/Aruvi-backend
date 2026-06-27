@@ -3,41 +3,81 @@ name: HidenCloud Auto Renew
 on:
   workflow_dispatch:
   schedule:
-    - cron: '11 2 * * *'
+    - cron: '13 3 4 5 *'
+
+permissions:
+  contents: write
+  actions: write
 
 jobs:
   renew:
     runs-on: ubuntu-latest
 
     steps:
-    - name: Checkout Aruvi-backend
-      uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-    - name: Clone hidencloud_renew
-      run: |
-        git clone --depth=1 https://github.com/c935289832/hidencloud_renew.git _renew
+      - name: Clone oyz8/HidenCloud
+        run: |
+          git clone --depth=1 https://github.com/oyz8/HidenCloud.git _renew
+          cp _renew/main.py .
 
-    - name: Setup Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.10'
-        cache: 'pip'
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-    - name: Install Dependencies
-      run: |
-        pip install -r _renew/requirements.txt
+      - name: Install Dependencies
+        run: pip install --quiet seleniumbase requests beautifulsoup4
 
-    - name: Run Renewal Script
-      working-directory: _renew
-      env:
-        PYTHONUTF8: "1"
-        PYTHONIOENCODING: UTF-8
-        HIDEN_COOKIE: ${{ secrets.HIDEN_COOKIE }}
-        WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
-        WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
-        WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
-        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
-        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
-        NOTIFY_CHANNEL: telegramBot
-      run: |
-        python main.py 2>&1
+      - name: Setup Proxy
+        env:
+          PROXY_NODE: ${{ secrets.PROXY_NODE }}
+        run: |
+          if [ -z "$PROXY_NODE" ]; then
+            echo "直连模式"
+            exit 0
+          fi
+          wget -q https://github.com/oyz6/action/releases/download/proxy/Xray-linux-64.zip
+          unzip -q Xray-linux-64.zip -d xray && chmod +x xray/xray
+          echo '{"log":{"loglevel":"warning"},"inbounds":[{"port":1080,"listen":"127.0.0.1","protocol":"socks","settings":{"udp":true}}],"outbounds":[{"protocol":"freedom","tag":"direct"}]}' > xray_config.json
+          ./xray/xray run -c xray_config.json > xray.log 2>&1 &
+          sleep 3
+          echo "PROXY_SERVER=socks5://127.0.0.1:1080" >> $GITHUB_ENV
+
+      - name: Run Renewal
+        env:
+          HIDENCLOUD: ${{ secrets.HIDENCLOUD }}
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          PROXY_SERVER: ${{ env.PROXY_SERVER }}
+        run: python3 main.py 2>&1 | tee renew.log
+
+      - name: Update Cron
+        if: success()
+        env:
+          REPO_TOKEN: ${{ secrets.REPO_TOKEN }}
+        run: |
+          DUE_DATE=$(grep -oP '到期时间\(标准\): \K\d{4}-\d{2}-\d{2}' renew.log | tail -1 || true)
+          if [ -z "$DUE_DATE" ] || [ -z "$REPO_TOKEN" ]; then
+            echo "跳过 cron 更新"
+            exit 0
+          fi
+          REMAINING=$(( ($(date -u -d "$DUE_DATE 00:00:00" +%s) - $(date -u +%s)) / 3600 ))
+          [ "$REMAINING" -gt 20 ] && NEXT=$((REMAINING - 20)) || NEXT=4
+          NEW_CRON="$(date -u -d "+${NEXT} hours" +'%-M %-H %-d %-m *')"
+          sed -i "s/cron: '.*'/cron: '$NEW_CRON'/" .github/workflows/renew.yml
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin https://x-access-token:$REPO_TOKEN@github.com/${{ github.repository }}.git
+          git add .github/workflows/renew.yml
+          git diff --cached --quiet || git commit -m "chore: auto cron $NEW_CRON" && git push
+
+      - name: Clean old runs
+        if: always()
+        uses: Mattraks/delete-workflow-runs@v2
+        with:
+          token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          delete_workflow_pattern: ${{ github.workflow }}
+          retain_days: 0
+          keep_minimum_runs: 2

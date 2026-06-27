@@ -309,13 +309,17 @@ async def myfiles_command(client, message: Message):
     
     text += "💡 Use /file <id> to manage a file"
     
-    await message.reply(
-        text,
-        reply_markup=InlineKeyboardMarkup([
-            [InlineKeyboardButton("📁 My Folders", callback_data="back_folders")],
-            [get_web_app_button(message.from_user.id, "🌐 Open Web")]
-        ])
-    )
+    from pyrogram.errors import ButtonUrlInvalid
+    try:
+        await message.reply(
+            text,
+            reply_markup=InlineKeyboardMarkup([
+                [InlineKeyboardButton("📁 My Folders", callback_data="back_folders")],
+                [get_web_app_button(message.from_user.id, "🌐 Open Web")]
+            ])
+        )
+    except ButtonUrlInvalid:
+        await message.reply(text)
 
 
 @tg_client.on_message(filters.command("folders") & filters.private)
@@ -657,17 +661,24 @@ async def handle_callback(client, callback: CallbackQuery):
 
     elif data == "get_web_link":
         # Fallback for old messages - show link and also provide Mini App button
+        from pyrogram.errors import ButtonUrlInvalid
         token = create_access_token(callback.from_user.id)
         web_url = f"{settings.web_base_url}/auth?token={token}"
-        await callback.message.reply(
+        text = (
             f"🌐 **Web Interface**\n\n"
             f"👉 {web_url}\n\n"
             "__(Link expires in 15 minutes)__\n\n"
-            "💡 Tap the button below to open directly:",
-            reply_markup=InlineKeyboardMarkup([
-                [get_web_app_button(callback.from_user.id, "🚀 Open Mini App")]
-            ])
+            "💡 Tap the button below to open directly:"
         )
+        try:
+            await callback.message.reply(
+                text,
+                reply_markup=InlineKeyboardMarkup([
+                    [get_web_app_button(callback.from_user.id, "🚀 Open Mini App")]
+                ])
+            )
+        except ButtonUrlInvalid:
+            await callback.message.reply(text)
         await callback.answer()
         
     elif data == "show_files":
@@ -699,13 +710,17 @@ async def handle_callback(client, callback: CallbackQuery):
         
         text += "💡 Use /file <id> to manage a file"
         
-        await callback.message.reply(
-            text,
-            reply_markup=InlineKeyboardMarkup([
-                [InlineKeyboardButton("📂 My Folders", callback_data="back_folders")],
-                [get_web_app_button(callback.from_user.id, "🌐 Open Web")]
-            ])
-        )
+        from pyrogram.errors import ButtonUrlInvalid
+        try:
+            await callback.message.reply(
+                text,
+                reply_markup=InlineKeyboardMarkup([
+                    [InlineKeyboardButton("📂 My Folders", callback_data="back_folders")],
+                    [get_web_app_button(callback.from_user.id, "🌐 Open Web")]
+                ])
+            )
+        except ButtonUrlInvalid:
+            await callback.message.reply(text)
         await callback.answer()
         
     elif data == "create_folder":

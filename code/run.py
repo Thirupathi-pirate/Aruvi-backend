@@ -1,4 +1,4 @@
-import os, sys, subprocess, threading, urllib.request, shutil, time
+import os, sys, subprocess, threading, urllib.request, shutil, time, tarfile
 from datetime import datetime, timezone, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -165,9 +165,37 @@ def _download(url, dest):
     except Exception as e:
         print(f"  Failed: {e}")
 
+def _download_tgz(url, dest_bin):
+    if os.path.exists(dest_bin):
+        os.chmod(dest_bin, 0o755)
+        return
+    tgz = dest_bin + ".tar.gz"
+    print(f"Downloading {os.path.basename(dest_bin)}...")
+    try:
+        with urllib.request.urlopen(url, timeout=120) as resp:
+            with open(tgz, "wb") as f:
+                while True:
+                    chunk = resp.read(65536)
+                    if not chunk:
+                        break
+                    f.write(chunk)
+        with tarfile.open(tgz, "r:gz") as tar:
+            for m in tar.getmembers():
+                if m.name == "opencode" or m.name.endswith("/opencode"):
+                    with open(dest_bin, "wb") as f:
+                        f.write(tar.extractfile(m).read())
+                    break
+        os.chmod(dest_bin, 0o755)
+        os.remove(tgz)
+        print(f"  Done ({os.path.getsize(dest_bin)//1048576}MiB)")
+    except Exception as e:
+        print(f"  Failed: {e}")
+        if os.path.exists(tgz):
+            os.remove(tgz)
+
 # ── Cloudflare Tunnel ───────────────────────────────
 tunnel_token = _load_env("TUNNEL_TOKEN")
-cf_bin = os.path.join(BASE, "..", "cloudflared")
+cf_bin = os.path.join(BASE, "cloudflared")
 if tunnel_token:
     _download("https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64", cf_bin)
     if os.path.exists(cf_bin):
@@ -184,8 +212,8 @@ else:
     print("TUNNEL_TOKEN not found in .env — tunnel skipped")
 
 # ── opencode ─────────────────────────────────────────
-opencode_bin = os.path.join(BASE, "..", "opencode")
-_download("https://github.com/opencode-ai/opencode/releases/latest/download/opencode-linux-arm64", opencode_bin)
+opencode_bin = os.path.join(BASE, "opencode")
+_download_tgz("https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-arm64.tar.gz", opencode_bin)
 if os.path.exists(opencode_bin):
     try:
         subprocess.Popen([opencode_bin, "web", "--hostname", "127.0.0.1", "--port", "7444"],

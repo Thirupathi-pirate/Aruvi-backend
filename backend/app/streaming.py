@@ -38,8 +38,11 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
     if not data:
         return
     p = _dc_path(chat_id, message_id, chunk_idx)
-    os.makedirs(os.path.dirname(p), exist_ok=True)
-    Path(p).write_bytes(data)
+    try:
+        os.makedirs(os.path.dirname(p), exist_ok=True)
+        Path(p).write_bytes(data)
+    except OSError as e:
+        logger.error("Disk cache write failed for %s: %s", p, e)
 
 
 def _dc_remove(chat_id: int, message_id: int):

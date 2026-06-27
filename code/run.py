@@ -8,20 +8,13 @@ ENV_FILE = os.path.join(BASE, ".env")
 
 os.chdir(BASE)
 
-# ── clone / pull repo ──────────────────────────────
+# ── fresh clone every time ─────────────────────────
 if os.path.exists(REPO_DIR):
-    r = subprocess.run(["git", "-C", REPO_DIR, "pull", "--ff-only"], capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"git pull --ff-only failed, trying fetch+reset: {r.stderr.strip()}")
-        subprocess.run(["git", "-C", REPO_DIR, "fetch", "origin", "main"], capture_output=True)
-        r2 = subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard", "origin/main"], capture_output=True, text=True)
-        if r2.returncode != 0:
-            print(f"git reset also failed: {r2.stderr.strip()} — continuing with stale repo")
-else:
-    r = subprocess.run(["git", "clone", "--depth=1", REPO_URL, REPO_DIR], capture_output=True, text=True)
-    if r.returncode != 0:
-        print(f"git clone failed (stderr): {r.stderr.strip()}")
-        sys.exit(1)
+    shutil.rmtree(REPO_DIR)
+r = subprocess.run(["git", "clone", "--depth=1", REPO_URL, REPO_DIR], capture_output=True, text=True)
+if r.returncode != 0:
+    print(f"git clone failed (stderr): {r.stderr.strip()}")
+    sys.exit(1)
 
 if not os.path.isdir(os.path.join(REPO_DIR, "backend")):
     print("ERROR: repo cloned but backend/ not found")

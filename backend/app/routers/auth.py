@@ -128,7 +128,7 @@ async def generate_login_code(
     code = ''.join(secrets.choice(alphabet) for _ in range(6))
 
     # Expiry in 10 minutes
-    expires_at = datetime.now(timezone.utc) + timedelta(minutes=10)
+    expires_at = datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
         
     login_code = LoginCode(
         code=code,
@@ -171,7 +171,7 @@ async def verify_login_code(
             headers={"Retry-After": "3"},
         )
         
-    if login_code.expires_at < datetime.now(timezone.utc):
+    if login_code.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
         await db.delete(login_code)
         await db.commit()
         # Same response as unclaimed — don't reveal code existed

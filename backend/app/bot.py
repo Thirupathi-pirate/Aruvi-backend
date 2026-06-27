@@ -128,7 +128,7 @@ async def start_command(client, message: Message):
         code_input = message.command[1].strip().upper()
         async with async_session() as db:
             # Atomic claim: UPDATE WHERE telegram_id IS NULL prevents race condition
-            now = datetime.now(timezone.utc)
+            now = datetime.now(timezone.utc).replace(tzinfo=None)
             result = await db.execute(
                 update(LoginCode)
                 .where(LoginCode.code == code_input)
@@ -453,7 +453,7 @@ async def login_command(client, message: Message):
                 await message.reply("❌ **Invalid code.**\nPlease check the code displayed on your TV.")
                 return
             
-            if login_code.expires_at < datetime.now(timezone.utc):
+            if login_code.expires_at < datetime.now(timezone.utc).replace(tzinfo=None):
                 await message.reply("❌ **Code expired.**\nPlease generate a new one on your TV.")
                 return
                 
@@ -481,7 +481,7 @@ async def login_command(client, message: Message):
         login_code = LoginCode(
             code=code,
             telegram_id=message.from_user.id,
-            expires_at=datetime.now(timezone.utc) + timedelta(minutes=10)
+            expires_at=datetime.now(timezone.utc).replace(tzinfo=None) + timedelta(minutes=10)
         )
         db.add(login_code)
         await db.commit()

@@ -28,7 +28,7 @@ async def admin_stats(
     files_c = await db.execute(select(func.count()).select_from(File))
     folders_c = await db.execute(select(func.count()).select_from(Folder))
     storage_c = await db.execute(select(func.coalesce(func.sum(File.file_size), 0)))
-    cutoff = datetime.now(timezone.utc) - timedelta(hours=24)
+    cutoff = datetime.now(timezone.utc).replace(tzinfo=None) - timedelta(hours=24)
     active_c = await db.execute(
         select(func.count()).where(User.last_active >= cutoff)
     )

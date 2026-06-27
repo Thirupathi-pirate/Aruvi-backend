@@ -2,5 +2,8 @@
   "server": {
     "port": 7444,
     "hostname": "127.0.0.1"
+  },
+  "tui": {
+    "mouse": false
   }
 }

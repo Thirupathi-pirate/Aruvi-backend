@@ -1,0 +1,43 @@
+name: HidenCloud Auto Renew
+
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: '11 2 * * *'
+
+jobs:
+  renew:
+    runs-on: ubuntu-latest
+
+    steps:
+    - name: Checkout Aruvi-backend
+      uses: actions/checkout@v4
+
+    - name: Clone hidencloud_renew
+      run: |
+        git clone --depth=1 https://github.com/c935289832/hidencloud_renew.git _renew
+
+    - name: Setup Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+        cache: 'pip'
+
+    - name: Install Dependencies
+      run: |
+        pip install -r _renew/requirements.txt
+
+    - name: Run Renewal Script
+      working-directory: _renew
+      env:
+        PYTHONUTF8: "1"
+        PYTHONIOENCODING: UTF-8
+        HIDEN_COOKIE: ${{ secrets.HIDEN_COOKIE }}
+        WEBDAV_URL: ${{ secrets.WEBDAV_URL }}
+        WEBDAV_USER: ${{ secrets.WEBDAV_USER }}
+        WEBDAV_PASS: ${{ secrets.WEBDAV_PASS }}
+        TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+        TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        NOTIFY_CHANNEL: telegramBot
+      run: |
+        python main.py 2>&1

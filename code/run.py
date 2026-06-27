@@ -1,4 +1,4 @@
-import os, sys, subprocess, threading, urllib.request, urllib.error, shutil, time
+import os, sys, subprocess, threading, urllib.request, shutil, time
 from datetime import datetime, timezone, timedelta
 
 BASE = os.path.dirname(os.path.abspath(__file__))
@@ -10,12 +10,25 @@ os.chdir(BASE)
 
 # ── clone / pull repo ──────────────────────────────
 if os.path.exists(REPO_DIR):
-    subprocess.run(["git", "-C", REPO_DIR, "pull", "--ff-only"], capture_output=True)
+    r = subprocess.run(["git", "-C", REPO_DIR, "pull", "--ff-only"], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"git pull --ff-only failed, trying fetch+reset: {r.stderr.strip()}")
+        subprocess.run(["git", "-C", REPO_DIR, "fetch", "origin", "main"], capture_output=True)
+        r2 = subprocess.run(["git", "-C", REPO_DIR, "reset", "--hard", "origin/main"], capture_output=True, text=True)
+        if r2.returncode != 0:
+            print(f"git reset also failed: {r2.stderr.strip()} — continuing with stale repo")
 else:
-    subprocess.run(["git", "clone", "--depth=1", REPO_URL, REPO_DIR], capture_output=True)
+    r = subprocess.run(["git", "clone", "--depth=1", REPO_URL, REPO_DIR], capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"git clone failed (stderr): {r.stderr.strip()}")
+        sys.exit(1)
+
+if not os.path.isdir(os.path.join(REPO_DIR, "backend")):
+    print("ERROR: repo cloned but backend/ not found")
+    sys.exit(1)
 
 CODE_DIR = os.path.join(REPO_DIR, "backend")
-sys.path.insert(0, CODE_DIR)
+os.chdir(CODE_DIR)
 
 # ── copy .env into repo ─────────────────────────────
 if os.path.exists(ENV_FILE):
@@ -26,15 +39,25 @@ os.makedirs(os.path.join(CODE_DIR, "data"), exist_ok=True)
 os.makedirs(os.path.join(CODE_DIR, "session"), exist_ok=True)
 os.environ["MEMORY"] = "3Gi"
 
-# ── install deps ────────────────────────────────────
-subprocess.run([sys.executable, "-m", "pip", "install", "-r",
-                os.path.join(CODE_DIR, "requirements.txt"), "-q"], capture_output=True)
+# ── install deps & validate import ──────────────────
+sys.path.insert(0, CODE_DIR)
+req = os.path.join(CODE_DIR, "requirements.txt")
+if os.path.exists(req):
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req, "-q"],
+                       capture_output=True, text=True)
+    if r.returncode != 0:
+        print(f"pip install failed:\n{r.stderr.strip()}")
+        sys.exit(1)
+
+try:
+    from app.main import app
+except Exception:
+    import traceback
+    traceback.print_exc()
+    sys.exit(1)
 
 # ── TelePlay ────────────────────────────────────────
 def run_teleplay():
-    sys.path.insert(0, CODE_DIR)
-    os.chdir(CODE_DIR)
-    from app.main import app
     import uvicorn as uv
     uv.run(app, host="127.0.0.1", port=7446, log_level="info")
 
@@ -53,7 +76,8 @@ def run_monitor():
         path = scope["path"]
         if path in ("", "/"):
             path = "/status.html"
-        file_path = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
+        rel = path[1:] if path.startswith("/") else path
+        file_path = os.path.normpath(os.path.join(STATIC_DIR, rel))
         if not file_path.startswith(STATIC_DIR):
             await send({"type": "http.response.start", "status": 403,
                         "headers": [(b"content-type", b"text/plain")]})
@@ -85,13 +109,13 @@ def run_monitor():
             fwd_headers = {}
             for k, v in scope.get("headers", []):
                 kl = k.decode().lower()
-                if kl not in ("authorization", "cookie", "host", "origin", "referer"):
+                if kl != "host":
                     fwd_headers[kl] = v.decode("utf-8", errors="replace")
             async with httpx.AsyncClient(timeout=30) as client:
                 try:
                     resp = await client.request(scope["method"], url,
                         content=body or None, headers=fwd_headers)
-                    hdrs = [(b"content-type", resp.headers.get("content-type", "application/json").encode())]
+                    hdrs = [(k, v) for k, v in resp.headers.raw]
                     await send({"type": "http.response.start", "status": resp.status_code, "headers": hdrs})
                     await send({"type": "http.response.body", "body": resp.content})
                 except Exception as e:
@@ -151,9 +175,8 @@ if tunnel_token:
     if os.path.exists(cf_bin):
         try:
             os.chmod(cf_bin, 0o755)
-            cf_log = open(os.path.join(BASE, "..", "cf.log"), "a")
             subprocess.Popen([cf_bin, "tunnel", "run", "--token", tunnel_token],
-                             stdout=cf_log, stderr=cf_log)
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             print("cloudflared tunnel started")
         except Exception as e:
             print(f"cloudflared start failed: {e}")
@@ -172,6 +195,17 @@ if os.path.exists(opencode_bin):
         print("opencode web ui started on :7444")
     except Exception as e:
         print(f"opencode start failed: {e}")
+
+# ── startup health check ────────────────────────────
+for i in range(30):
+    try:
+        urllib.request.urlopen("http://127.0.0.1:7446/health", timeout=2)
+        print("TelePlay is healthy")
+        break
+    except Exception:
+        if i == 29:
+            print("WARNING: TelePlay health check failed after 30s — continuing anyway")
+        time.sleep(1)
 
 # ── daily restart at 3:30 AM IST ─────────────────────
 IST = timezone(timedelta(hours=5, minutes=30))

@@ -199,7 +199,8 @@ if os.path.exists(opencode_bin):
 # ── startup health check ────────────────────────────
 for i in range(30):
     try:
-        urllib.request.urlopen("http://127.0.0.1:7446/health", timeout=2)
+        with urllib.request.urlopen("http://127.0.0.1:7446/health", timeout=2):
+            pass
         print("TelePlay is healthy")
         break
     except Exception:
@@ -224,4 +225,5 @@ while True:
     print(f"Next restart at 3:30 AM IST (in {h}h {m}m {s}s)")
     time.sleep(secs)
     print("Scheduled restart — exiting for fresh IP")
+    sys.stdout.flush()
     os._exit(0)

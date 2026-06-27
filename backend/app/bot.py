@@ -4,8 +4,10 @@ Handles commands, file uploads, and inline callbacks.
 """
 
 import asyncio
+import functools
 import secrets
 import string
+import traceback
 from datetime import datetime, timedelta, timezone
 from pyrogram import filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton, WebAppInfo
@@ -18,6 +20,20 @@ from .config import get_settings
 from .auth import create_access_token
 
 settings = get_settings()
+
+_log = __import__('logging').getLogger(__name__)
+
+
+def _log_exceptions(coro):
+    """Wrap a coroutine handler with exception logging to stderr."""
+    @functools.wraps(coro)
+    async def wrapper(*args, **kwargs):
+        try:
+            return await coro(*args, **kwargs)
+        except Exception:
+            _log.exception("Unhandled exception in %s", coro.__name__)
+            traceback.print_exc()
+    return wrapper
 
 
 def format_size(size_bytes: int) -> str:
@@ -88,15 +104,17 @@ def get_web_app_button(telegram_id: int, text: str = "🌐 Open Web") -> InlineK
 # ============== Authorization Middleware ==============
 
 @tg_client.on_message(filters.private, group=-2)
+@_log_exceptions
 async def check_auth(client, message: Message):
-    """All users can use the bot. AUTH_USERS (if set) get auto-admin via get_or_create_user."""
+    """All users can use the bot."""
     pass
 
 # ============== Command Handlers ==============
 
 @tg_client.on_message(filters.command("start") & filters.private)
+@_log_exceptions
 async def start_command(client, message: Message):
-    """Welcome message and bot instructions. Also handles deep-linked login codes."""
+    _log.info("start_command called by user %s", message.from_user.id)
     await get_or_create_user(
         message.from_user.id,
         message.from_user.username,
@@ -382,7 +400,9 @@ async def web_command(client, message: Message):
 
 
 @tg_client.on_message(filters.command("login") & filters.private)
+@_log_exceptions
 async def login_command(client, message: Message):
+    _log.info("login_command called by user %s", message.from_user.id)
     """
     Handle login command.
     Usage:
@@ -480,7 +500,9 @@ async def logout_all_command(client, message: Message):
 # ============== File Handler ==============
 
 @tg_client.on_message(filters.private & (filters.video | filters.audio | filters.document | filters.photo))
+@_log_exceptions
 async def handle_file(client, message: Message):
+    _log.info("handle_file from user %s: %s", message.from_user.id, message.document.file_name if message.document else "?")
     """Handle uploaded files - forward to channel and save to DB."""
     # Get or create user
     user = await get_or_create_user(
@@ -580,7 +602,9 @@ async def handle_file(client, message: Message):
 # ============== Callback Query Handlers ==============
 
 @tg_client.on_callback_query()
+@_log_exceptions
 async def handle_callback(client, callback: CallbackQuery):
+    _log.info("handle_callback: %s from user %s", callback.data, callback.from_user.id)
     """Handle inline button callbacks."""
     data = callback.data
     

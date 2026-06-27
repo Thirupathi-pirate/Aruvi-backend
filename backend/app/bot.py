@@ -152,37 +152,61 @@ async def start_command(client, message: Message):
             else:
                 await message.reply("❌ This code has expired.")
 
-    await message.reply(
-        "📺 **Welcome to Aruvi!**\n\n"
-        "Your personal media streaming platform.\n"
-        "Upload files here, stream anywhere!\n\n"
-        
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "🚀 **QUICK START**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "1️⃣ Send any media file to upload\n"
-        "2️⃣ Use /web to open web player\n"
-        "3️⃣ Use /login on your TV app\n\n"
-        
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "📝 **COMMANDS**\n"
-        "━━━━━━━━━━━━━━━━━━━━\n"
-        "/myfiles - Your files with IDs\n"
-        "/file `<id>` - Manage a file\n"
-        "/folders - Browse folders\n"
-        "/newfolder `<name>` - New folder\n"
-        "/help - Full help guide\n\n"
-        
-        "💡 After uploading, you'll get the **File ID**\n"
-        "Use `/file <id>` to rename, move, or delete.",
-        reply_markup=InlineKeyboardMarkup([
-            [get_web_app_button(message.from_user.id, "🌐 Open Web Interface")],
-            [
-                InlineKeyboardButton("📁 My Files", callback_data="show_files"),
-                InlineKeyboardButton("📂 My Folders", callback_data="back_folders")
-            ]
-        ])
-    )
+    from pyrogram.errors import ButtonUrlInvalid
+    try:
+        await message.reply(
+            "📺 **Welcome to Aruvi!**\n\n"
+            "Your personal media streaming platform.\n"
+            "Upload files here, stream anywhere!\n\n"
+            
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🚀 **QUICK START**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "1️⃣ Send any media file to upload\n"
+            "2️⃣ Use /web to open web player\n"
+            "3️⃣ Use /login on your TV app\n\n"
+            
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📝 **COMMANDS**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "/myfiles - Your files with IDs\n"
+            "/file `<id>` - Manage a file\n"
+            "/folders - Browse folders\n"
+            "/newfolder `<name>` - New folder\n"
+            "/help - Full help guide\n\n"
+            
+            "💡 After uploading, you'll get the **File ID**\n"
+            "Use `/file <id>` to rename, move, or delete.",
+            reply_markup=InlineKeyboardMarkup([
+                [get_web_app_button(message.from_user.id, "🌐 Open Web Interface")],
+                [
+                    InlineKeyboardButton("📁 My Files", callback_data="show_files"),
+                    InlineKeyboardButton("📂 My Folders", callback_data="back_folders")
+                ]
+            ])
+        )
+    except ButtonUrlInvalid:
+        await message.reply(
+            "📺 **Welcome to Aruvi!**\n\n"
+            "Your personal media streaming platform.\n"
+            "Upload files here, stream anywhere!\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🚀 **QUICK START**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "1️⃣ Send any media file to upload\n"
+            "2️⃣ Use /web to open web player\n"
+            "3️⃣ Use /login on your TV app\n\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "📝 **COMMANDS**\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "/myfiles - Your files with IDs\n"
+            "/file `<id>` - Manage a file\n"
+            "/folders - Browse folders\n"
+            "/newfolder `<name>` - New folder\n"
+            "/help - Full help guide\n\n"
+            "💡 After uploading, you'll get the **File ID**\n"
+            "Use `/file <id>` to rename, move, or delete."
+        )
 
 
 @tg_client.on_message(filters.command("help") & filters.private)

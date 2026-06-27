@@ -251,7 +251,12 @@ while True:
     h, m = divmod(int(secs), 3600)
     m, s = divmod(m, 60)
     print(f"Next restart at 3:30 AM IST (in {h}h {m}m {s}s)")
-    time.sleep(secs)
+    try:
+        time.sleep(secs)
+    except KeyboardInterrupt:
+        print("Received stop signal — exiting")
+        sys.stdout.flush()
+        os._exit(0)
     print("Scheduled restart — exiting for fresh IP")
     sys.stdout.flush()
     os._exit(0)

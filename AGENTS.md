@@ -15,7 +15,7 @@
 
 | Domain | Target |
 |--------|--------|
-| `aaruvi.aaruvi.space` | `localhost:7446` — TelePlay |
+| `REDACTED_DOMAIN` | `localhost:7446` — TelePlay |
 | `REDACTED_DOMAIN` | `localhost:7444` — opencode Web UI |
 | `monitor.aaruvi.space` | `localhost:7442` — Status dashboard |
 

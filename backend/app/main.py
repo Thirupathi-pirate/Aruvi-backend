@@ -115,7 +115,7 @@ app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 # List allowed origins explicitly instead of using "*"
 allowed_origins = [
     settings.web_base_url,
-    "https://aaruvi.aaruvi.space",
+    "https://REDACTED_DOMAIN",
     "http://localhost:3000",
     "http://localhost:5173",
     "http://127.0.0.1:3000",

@@ -87,7 +87,7 @@ class Settings(BaseSettings):
     telegram_proxy_enabled: bool = False
 
     # Web
-    web_base_url: str = "https://aaruvi.aaruvi.space"
+    web_base_url: str = "https://REDACTED_DOMAIN"
 
     model_config = SettingsConfigDict(
         env_file=".env",

@@ -4,7 +4,12 @@ from datetime import datetime, timezone, timedelta
 BASE = os.path.dirname(os.path.abspath(__file__))
 REPO_URL = "https://github.com/Thirupathi-pirate/Aruvi-backend.git"
 REPO_DIR = os.path.join(BASE, "repo")
+
 ENV_FILE = os.path.join(BASE, ".env")
+if not os.path.exists(ENV_FILE):
+    parent_env = os.path.join(BASE, "..", ".env")
+    if os.path.exists(parent_env):
+        ENV_FILE = os.path.abspath(parent_env)
 
 os.chdir(BASE)
 

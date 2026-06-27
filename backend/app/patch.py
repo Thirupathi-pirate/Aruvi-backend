@@ -161,6 +161,7 @@ async def resolve_listener(
         if callable(listener["filters"]):
             if not await listener["filters"](client, update):
                 update.continue_propagation()
+                return
         listener["future"].set_result(update)  # type: ignore
         update.stop_propagation()
     else:

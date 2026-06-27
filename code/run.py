@@ -39,9 +39,11 @@ os.environ["MEMORY"] = "3Gi"
 
 # ── install deps & validate import ──────────────────
 sys.path.insert(0, CODE_DIR)
+import site
+site.addsitedir(site.USER_SITE)
 req = os.path.join(CODE_DIR, "requirements.txt")
 if os.path.exists(req):
-    r = subprocess.run([sys.executable, "-m", "pip", "install", "-r", req, "-q"],
+    r = subprocess.run([sys.executable, "-m", "pip", "install", "--user", "-r", req, "-q"],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print(f"pip install failed:\n{r.stderr.strip()}")

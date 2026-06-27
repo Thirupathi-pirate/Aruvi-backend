@@ -3,6 +3,7 @@ PyroTGFork MTProto client for Telegram interactions.
 Handles both bot commands and file streaming via a client pool.
 """
 import time
+import os
 from .patch import Client
 from pyrogram.types import Message
 from .config import get_settings
@@ -14,7 +15,7 @@ import logging
 settings = get_settings()
 
 BASE_DIR = Path(__file__).resolve().parent.parent
-SESSION_DIR = BASE_DIR / "session"
+SESSION_DIR = Path(os.environ.get("TELEGRAM_SESSION_DIR", str(BASE_DIR / "session")))
 
 
 def get_session_name(index: int) -> str:
@@ -122,19 +123,20 @@ async def stop_all_clients():
 
 
 async def reconnect_client(client: Client) -> bool:
-    """Disconnect and reconnect a Pyrogram client to get a fresh DC auth key.
+    """Disconnect, re-authorize, and reconnect a Pyrogram client.
     
-    Call this when catching AuthKeyUnregistered — the old auth key expired.
+    Uses start() (not just connect()) so a new auth key is obtained
+    when the old one was invalidated (AuthKeyUnregistered).
     Returns True if reconnection succeeded, False otherwise.
     """
     try:
         if client.is_connected:
             await client.disconnect()
-        await client.connect()
-        diag_log(f"Client {getattr(client, 'pool_index', '?')} reconnected successfully")
+        await client.start()
+        diag_log(f"Client {getattr(client, 'pool_index', '?')} re-authorized successfully")
         return True
     except Exception as e:
-        diag_log(f"Client {getattr(client, 'pool_index', '?')} reconnect failed: {e}")
+        diag_log(f"Client {getattr(client, 'pool_index', '?')} re-auth failed: {e}")
         return False
 
 

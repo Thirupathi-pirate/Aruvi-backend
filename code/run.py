@@ -36,6 +36,7 @@ if os.path.exists(ENV_FILE):
 os.makedirs(os.path.join(CODE_DIR, "data"), exist_ok=True)
 os.makedirs(os.path.join(CODE_DIR, "session"), exist_ok=True)
 os.environ["MEMORY"] = "3Gi"
+os.environ["TELEGRAM_SESSION_DIR"] = os.path.join(CODE_DIR, "session")
 
 # ── install deps & validate import ──────────────────
 sys.path.insert(0, CODE_DIR)

@@ -478,7 +478,7 @@ async def parallel_stream_generator(
                         if not results[current].done():
                             results[current].set_result(data)
                         current += 1
-        except (asyncio.TimeoutError, ConnectionError, OSError) as e:
+        except (asyncio.TimeoutError, ConnectionError, OSError, AuthKeyUnregistered) as e:
             logger.warning("Bot %d batch %d-%d aborted: %s", getattr(cl, 'pool_index', '?'), batch_start, batch_end, e)
             return False
         elapsed = time.perf_counter() - t0

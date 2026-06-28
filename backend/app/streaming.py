@@ -17,10 +17,12 @@ DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 4 * 3600  # 4 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Sliding window: chunks within [-100, +200] of current playback position stay in RAM
-FWD_WINDOW = 200   # 200MB forward cache
-BACK_WINDOW = 100  # 100MB backward cache
-RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 300MB total
+# Sliding window: chunks within [-20, +50] of current playback position stay in RAM
+# Conservative for 3GB RAM: 70MB/stream × 5 streams = 350MB max cache
+# Excess chunks spill to NVMe disk automatically
+FWD_WINDOW = 50   # 50MB forward cache (enough for ~10s of 4K video)
+BACK_WINDOW = 20  # 20MB backward cache (enough for seek-back)
+RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 70MB total
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
@@ -317,7 +319,7 @@ _client_semaphores = {}
 # Limit total concurrent streams to prevent OOM from 2 GB prebuffers stacking.
 # Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
 # With LIMIT=5, max in-flight = 5 × 200 MB = 1 GB, headroom on 3 GB machine.
-_stream_semaphore = asyncio.Semaphore(10)
+_stream_semaphore = asyncio.Semaphore(5)
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
     if client_index not in _client_semaphores:

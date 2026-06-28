@@ -16,7 +16,7 @@ from .config import get_settings
 from .database import init_db
 from .rate_limit import limiter
 from .telegram import start_telegram_client, stop_telegram_client
-from .status import get_status, attach_ring_handler, clear_logs
+from .status import get_status, attach_ring_handler, clear_logs, _discover_cgroup_memory
 from .streaming import _dc_cleanup_old
 from .routers import files_router, folders_router, streaming_router, auth_router, tv_router, admin_router
 
@@ -42,10 +42,26 @@ async def _clear_cache_4h():
 
 
 async def _cleanup_disk_cache_1h():
-    """Remove NVMe chunk files older than 4 hours."""
+    """Remove NVMe chunk files older than 3 hours."""
     while True:
         await asyncio.sleep(3600)
         await asyncio.to_thread(_dc_cleanup_old)
+
+
+async def _oom_guard_30s():
+    """Background OOM guard: clear in-memory caches when RAM exceeds 80%."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            cur, mx = _discover_cgroup_memory()
+            if cur is not None and mx is not None and cur > 0.8 * mx:
+                from .streaming import _cache_manager as cm, _forward_streams as fs
+                active = {(info["chat_id"], mid) for mid, info in list(fs.items())}
+                freed = cm.clear_all(exclude_keys=active)
+                kept = len(active)
+                logger.warning("OOM guard: cleared %.1f MB from cache (%d active streams)", freed / 1024 / 1024, kept)
+        except Exception:
+            pass
 
 
 @asynccontextmanager
@@ -62,17 +78,20 @@ async def lifespan(app: FastAPI):
     cleanup_task = asyncio.create_task(_cleanup_expired_codes())
     cache_clear_task = asyncio.create_task(_clear_cache_4h())
     disk_cache_task = asyncio.create_task(_cleanup_disk_cache_1h())
+    oom_task = asyncio.create_task(_oom_guard_30s())
     
     yield
     
     cleanup_task.cancel()
     cache_clear_task.cancel()
     disk_cache_task.cancel()
+    oom_task.cancel()
     startup_task.cancel()
     try:
         await cleanup_task
         await cache_clear_task
         await disk_cache_task
+        await oom_task
         await startup_task
     except asyncio.CancelledError:
         pass

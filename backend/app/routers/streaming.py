@@ -100,22 +100,23 @@ async def stream_file(
         except Exception as e:
             logger.error("Stream failed for file %d: %s", file_id, e)
             raise
-    
+
     # Determine content disposition
     mime_type = file.mime_type or "application/octet-stream"
     disposition = "attachment" if download else ("inline" if ("video/" in mime_type or "audio/" in mime_type) else "attachment")
-    
+
     from urllib.parse import quote
     encoded_filename = quote(file.file_name)
-    
+
     headers = {
         "Content-Type": mime_type,
         "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
         "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=86400",
     }
     if range_header:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-    
+
     return StreamingResponse(
         file_streamer(),
         status_code=206 if range_header else 200,
@@ -261,22 +262,23 @@ async def stream_public_file(
         except Exception as e:
             logger.error("Public stream failed for hash %s: %s", public_hash, e)
             raise
-    
+
     # Determine content disposition
     mime_type = file.mime_type or "application/octet-stream"
     disposition = "attachment" if download else ("inline" if ("video/" in mime_type or "audio/" in mime_type) else "attachment")
-    
+
     from urllib.parse import quote
     encoded_filename = quote(file.file_name)
-    
+
     headers = {
         "Content-Type": mime_type,
         "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
         "Accept-Ranges": "bytes",
+        "Cache-Control": "public, max-age=86400",
     }
     if range_header:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
-    
+
     return StreamingResponse(
         file_streamer(),
         status_code=206 if range_header else 200,

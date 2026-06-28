@@ -159,11 +159,21 @@ async def _warmup_messages():
         return
     try:
         diag_log("Warming up...")
-        # Fetch any message — even None warms the DC connection
-        msg = await tg_client.get_messages(channel_id, 1)
-        if msg and msg.id not in _msg_cache:
-            _msg_cache[msg.id] = (time.monotonic(), msg)
-        diag_log("Warmup done — %d cached", len(_msg_cache))
+        # Fetch the most recent messages to populate cache and warm DC connection
+        cached = 0
+        async for msg in tg_client.get_chat_history(channel_id, limit=5):
+            if msg and msg.id not in _msg_cache:
+                _msg_cache[msg.id] = (time.monotonic(), msg)
+                cached += 1
+        diag_log("Warmup done — %d cached (%d new)", len(_msg_cache), cached)
+    except AttributeError:
+        # Fallback: get_chat_history not available, fetch one message by ID
+        try:
+            msg = await tg_client.get_messages(channel_id, 1)
+            if msg and msg.id not in _msg_cache:
+                _msg_cache[msg.id] = (time.monotonic(), msg)
+        except Exception:
+            pass
     except Exception:
         pass  # Warmup is best-effort
 
@@ -205,7 +215,7 @@ async def stop_telegram_client():
 # ── Message cache ────────────────────────────────────────────────────
 
 _msg_cache: dict[int, tuple[float, Message]] = {}
-MSG_CACHE_TTL = 300  # 5 minutes
+MSG_CACHE_TTL = 3600  # 1 hour (messages in storage channel don't change)
 _MSG_CACHE_MAX = 5000
 
 def _msg_cache_evict():

@@ -177,6 +177,14 @@ async def health():
         "client_connected": tg_client.is_connected if tg_client else False,
     }
 
+@app.post("/api/restart")
+async def api_restart():
+    """Restart the entire process (HidenCloud will re-launch)."""
+    import sys
+    logger.warning("Restart requested via /api/restart — exiting")
+    sys.stdout.flush()
+    os._exit(0)
+
 @app.get("/diag")
 async def diagnostic():
     """Diagnostic endpoint (logs, client status, env info)."""

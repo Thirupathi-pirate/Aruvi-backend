@@ -158,17 +158,14 @@ async def _warmup_messages():
     if not channel_id or not tg_client.is_connected:
         return
     try:
-        # Fetch last 5 messages — warms the DC connection and populates _msg_cache
-        diag_log("Warming up message cache...")
-        for mid in range(1, 6):
-            msg = await tg_client.get_messages(channel_id, mid)
-            if msg and msg.id not in _msg_cache:
-                _msg_cache[msg.id] = (time.monotonic(), msg)
-                diag_log(f"Warmup: cached message {msg.id}")
-        _msg_cache_evict()
-        diag_log("Warmup complete — %d messages cached", len(_msg_cache))
-    except Exception as e:
-        diag_log(f"Warmup skipped: {e}")
+        diag_log("Warming up...")
+        # Fetch any message — even None warms the DC connection
+        msg = await tg_client.get_messages(channel_id, 1)
+        if msg and msg.id not in _msg_cache:
+            _msg_cache[msg.id] = (time.monotonic(), msg)
+        diag_log("Warmup done — %d cached", len(_msg_cache))
+    except Exception:
+        pass  # Warmup is best-effort
 
 
 async def _finish_startup():

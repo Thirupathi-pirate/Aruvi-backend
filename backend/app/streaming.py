@@ -5,7 +5,7 @@ Multi-client parallel streaming for maximum download speed.
 import asyncio
 import os
 import re
-import shutil
+
 import time
 import logging
 from typing import AsyncGenerator
@@ -47,11 +47,6 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
     except OSError as e:
         logger.error("Disk cache write failed for %s: %s", p, e)
 
-
-def _dc_remove(chat_id: int, message_id: int):
-    d = os.path.join(DISK_CACHE_BASE, str(chat_id), str(message_id))
-    if os.path.isdir(d):
-        shutil.rmtree(d, ignore_errors=True)
 
 
 def _dc_cleanup_old():
@@ -160,7 +155,8 @@ class StreamCache:
         for idx in to_remove:
             data = self._data.pop(idx)
             self._size -= len(data)
-            _dc_put(self.chat_id, self.message_id, idx, data)
+            if idx > self.position:
+                _dc_put(self.chat_id, self.message_id, idx, data)
             self._evictions += 1
 
     def get(self, key: int) -> bytes | None:
@@ -192,9 +188,10 @@ class StreamCache:
                 farthest = max(self._data.keys(), key=lambda k: abs(k - self.position))
                 old = self._data.pop(farthest)
                 self._size -= len(old)
-                _dc_put(self.chat_id, self.message_id, farthest, old)
+                if farthest > self.position:
+                    _dc_put(self.chat_id, self.message_id, farthest, old)
                 self._evictions += 1
-        else:
+        elif key > self.position:
             _dc_put(self.chat_id, self.message_id, key, data)
 
     def clear(self) -> int:
@@ -511,7 +508,6 @@ async def parallel_stream_generator(
                             break
                         data = bytes(part)
                         video_cache.store(current, data)
-                        _dc_put(chat_id, message_id, current, data)
                         if not results[current].done():
                             results[current].set_result(data)
                         current += 1
@@ -692,7 +688,6 @@ async def parallel_stream_generator(
         _forward_streams.pop(message_id, None)
         for w in worker_tasks:
             w.cancel()
-        _dc_remove(chat_id, message_id)
         _cache_manager.remove(chat_id, message_id)
         elapsed = time.perf_counter() - stream_start
         if total_chunks:

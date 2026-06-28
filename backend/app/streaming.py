@@ -11,7 +11,7 @@ import logging
 from typing import AsyncGenerator
 from pathlib import Path
 
-BATCH_SIZE = 10  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
+BATCH_SIZE = 7  # chunks per stream_media call
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 4 * 3600  # 4 hours
@@ -364,13 +364,14 @@ async def _retry_chunk_with_alt_client(
     Retries up to 5 full cycles with exponential backoff (2^cycle).
     Handles flood wait, auth expiry, and transient network errors.
     Only yields empty bytes as absolute last resort.
+    Skips bot 0 (main bot) — slow at scraping.
     """
     pool_size = len(clients)
     max_cycles = 5
     for cycle in range(max_cycles):
         for offset in range(1, pool_size):
             alt_c_idx = (failed_c_idx + offset) % pool_size
-            if alt_c_idx == failed_c_idx:
+            if alt_c_idx == failed_c_idx or alt_c_idx == 0:
                 continue
             alt_client = clients[alt_c_idx]
             try:
@@ -437,11 +438,14 @@ async def parallel_stream_generator(
     to avoid cross-bot FILE_REFERENCE_INVALID errors.
     """
     pool_size = len(clients)
+    # Only helper bots (1-13) used for streaming — bot 0 is slow at scraping
+    helper_pool = [c for c in clients if getattr(c, 'pool_index', 0) != 0]
+    helper_count = len(helper_pool)
     if concurrency is None:
-        concurrency = max(1, sum(1 for c in clients if c.is_connected))
+        concurrency = max(1, sum(1 for c in helper_pool if c.is_connected))
 
-    if not any(c.is_connected for c in clients):
-        raise ConnectionError("No Telegram clients are connected")
+    if not any(c.is_connected for c in helper_pool):
+        raise ConnectionError("No helper clients are connected")
 
     start_chunk = offset // chunk_size
     end_chunk = (offset + length - 1) // chunk_size
@@ -532,29 +536,20 @@ async def parallel_stream_generator(
             return None
 
     async def worker(worker_id: int):
-        client = clients[worker_id % pool_size]
-        c_idx = getattr(client, "pool_index", worker_id % pool_size)
+        client = helper_pool[worker_id % helper_count]
+        c_idx = getattr(client, "pool_index", -1)
 
-        # If this helper isn't connected yet, fall back to main bot
+        # Skip if this helper isn't connected
         if not client.is_connected:
-            if clients[0].is_connected:
-                client = clients[0]
-                c_idx = 0
-            else:
-                logger.error("Worker %d: no connected client available", worker_id)
-                return
+            logger.error("Worker %d: helper bot %d not connected", worker_id, c_idx)
+            return
 
-        # Each worker normally fetches its own fresh Message so file references
-        # are per-client and valid. Bot 0 gets the already-fetched initial_message
-        # to save ~1s round-trip on first chunk.
-        if c_idx == 0:
-            local_msg = initial_message
-        else:
-            try:
-                local_msg = await client.get_messages(chat_id, message_id)
-            except Exception as e:
-                logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
-                return
+        # Each worker fetches its own fresh Message so file references are per-client
+        try:
+            local_msg = await client.get_messages(chat_id, message_id)
+        except Exception as e:
+            logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
+            return
         if not local_msg:
             logger.error("Bot %d: message %d not found", c_idx, message_id)
             raise FileNotFoundError(f"Message {message_id} not found in storage channel")
@@ -645,12 +640,12 @@ async def parallel_stream_generator(
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
 
-    # Yield results in order with windowed 200MB pre-buffer
-    # First 200 chunks yield immediately — zero startup delay.
-    # From chunk 200 onward, before yielding chunk N, we wait for chunk N+200
-    # to be ready. This maintains a 200MB lookahead cushion that absorbs
+    # Yield results in order with windowed 100MB pre-buffer
+    # First 100 chunks yield immediately — zero startup delay.
+    # From chunk 100 onward, before yielding chunk N, we wait for chunk N+100
+    # to be ready. This maintains a 100MB lookahead cushion that absorbs
     # Telegram latency spikes without pausing ExoPlayer.
-    PREBUFFER_CHUNKS = 200
+    PREBUFFER_CHUNKS = 100
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
@@ -659,7 +654,7 @@ async def parallel_stream_generator(
         for offset in range(total_chunks):
             chunk_idx = start_chunk + offset
             
-            # From chunk 2000 onward, ensure lookahead is ready
+            # From chunk 100 onward, ensure lookahead is ready
             if offset >= PREBUFFER_CHUNKS:
                 lookahead_idx = chunk_idx + PREBUFFER_CHUNKS
                 if lookahead_idx <= end_chunk:

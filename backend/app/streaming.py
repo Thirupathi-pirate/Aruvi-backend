@@ -487,12 +487,20 @@ async def parallel_stream_generator(
     else:
         logger.debug("No cache: fetching %d", total_chunks)
 
-    # Task queue with batch ranges — only uncached chunks
+    # Task queue — only filled up to MAX_AHEAD ahead of current position
+    # Prevents the forward buffer of resolved futures from exhausting RAM
     task_queue = asyncio.Queue()
-    for rstart, rend in uncached_ranges:
-        for batch_start in range(rstart, rend + 1, BATCH_SIZE):
-            batch_end = min(batch_start + BATCH_SIZE - 1, rend)
-            task_queue.put_nowait((batch_start, batch_end))
+    MAX_AHEAD = 300  # max 300MB of resolved futures ahead
+
+    async def refill_queue():
+        for rstart, rend in uncached_ranges:
+            for batch_start in range(rstart, rend + 1, BATCH_SIZE):
+                batch_end = min(batch_start + BATCH_SIZE - 1, rend)
+                while True:
+                    if batch_start <= video_cache.position + MAX_AHEAD:
+                        await task_queue.put((batch_start, batch_end))
+                        break
+                    await asyncio.sleep(0.2)
 
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
@@ -634,7 +642,8 @@ async def parallel_stream_generator(
                 await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
             task_queue.task_done()
 
-    # Launch workers
+    # Launch workers + refill task
+    refill_task = asyncio.create_task(refill_queue())
     worker_tasks = [
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
@@ -686,6 +695,7 @@ async def parallel_stream_generator(
             del results[chunk_idx]
     finally:
         _forward_streams.pop(message_id, None)
+        refill_task.cancel()
         for w in worker_tasks:
             w.cancel()
         _cache_manager.remove(chat_id, message_id)

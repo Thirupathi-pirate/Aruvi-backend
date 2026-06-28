@@ -14,7 +14,7 @@ from pathlib import Path
 BATCH_SIZE = 7  # chunks per stream_media call
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 DISK_CACHE_BASE = "data/chunks"
-DISK_CACHE_TTL = 4 * 3600  # 4 hours
+DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
 # Sliding window: chunks within [-20, +50] of current playback position stay in RAM
@@ -511,6 +511,7 @@ async def parallel_stream_generator(
                             break
                         data = bytes(part)
                         video_cache.store(current, data)
+                        _dc_put(chat_id, message_id, current, data)
                         if not results[current].done():
                             results[current].set_result(data)
                         current += 1

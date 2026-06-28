@@ -165,7 +165,7 @@ async def _warmup_messages():
             if msg and msg.id not in _msg_cache:
                 _msg_cache[msg.id] = (time.monotonic(), msg)
                 cached += 1
-        diag_log("Warmup done — %d cached (%d new)", len(_msg_cache), cached)
+        diag_log(f"Warmup done — {len(_msg_cache)} cached ({cached} new)")
     except AttributeError:
         # Fallback: get_chat_history not available, fetch one message by ID
         try:

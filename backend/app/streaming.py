@@ -11,7 +11,7 @@ import logging
 from typing import AsyncGenerator
 from pathlib import Path
 
-BATCH_SIZE = 5  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
+BATCH_SIZE = 10  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 4 * 3600  # 4 hours
@@ -663,7 +663,10 @@ async def parallel_stream_generator(
             if offset >= PREBUFFER_CHUNKS:
                 lookahead_idx = chunk_idx + PREBUFFER_CHUNKS
                 if lookahead_idx <= end_chunk:
-                    await results[lookahead_idx]
+                    try:
+                        await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass  # Don't block — yield the current chunk and continue
             
             # Update sliding window position before cache ops
             video_cache.set_position(chunk_idx)

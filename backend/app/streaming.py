@@ -48,7 +48,6 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
         logger.error("Disk cache write failed for %s: %s", p, e)
 
 
-
 def _dc_cleanup_old():
     if not os.path.isdir(DISK_CACHE_BASE):
         return
@@ -191,7 +190,7 @@ class StreamCache:
                 if farthest > self.position:
                     _dc_put(self.chat_id, self.message_id, farthest, old)
                 self._evictions += 1
-        elif key > self.position:
+        elif key >= self.position:
             _dc_put(self.chat_id, self.message_id, key, data)
 
     def clear(self) -> int:

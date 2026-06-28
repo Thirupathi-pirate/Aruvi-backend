@@ -159,23 +159,13 @@ async def _warmup_messages():
         return
     try:
         diag_log("Warming up...")
-        # Fetch the most recent messages to populate cache and warm DC connection
         cached = 0
-        async for msg in tg_client.get_chat_history(channel_id, limit=5):
+        for mid in range(1, 6):
+            msg = await tg_client.get_messages(channel_id, mid)
             if msg and msg.id not in _msg_cache:
                 _msg_cache[msg.id] = (time.monotonic(), msg)
                 cached += 1
         diag_log(f"Warmup done — {len(_msg_cache)} cached ({cached} new)")
-    except AttributeError:
-        # Fallback: get_chat_history not available, fetch one message by ID
-        diag_log("get_chat_history not available, trying fallback...")
-        try:
-            msg = await tg_client.get_messages(channel_id, 1)
-            if msg and msg.id not in _msg_cache:
-                _msg_cache[msg.id] = (time.monotonic(), msg)
-                diag_log(f"Warmup fallback: cached message {msg.id}")
-        except Exception:
-            pass
     except Exception:
         pass  # Warmup is best-effort
 

@@ -12,6 +12,7 @@ from typing import AsyncGenerator
 from pathlib import Path
 
 BATCH_SIZE = 5  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
+CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 4 * 3600  # 4 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
@@ -316,13 +317,39 @@ _client_semaphores = {}
 # Limit total concurrent streams to prevent OOM from 2 GB prebuffers stacking.
 # Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
 # With LIMIT=5, max in-flight = 5 × 200 MB = 1 GB, headroom on 3 GB machine.
-_stream_semaphore = asyncio.Semaphore(5)
+_stream_semaphore = asyncio.Semaphore(10)
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
     if client_index not in _client_semaphores:
         # Use the configured concurrency limit
         _client_semaphores[client_index] = asyncio.Semaphore(settings.telegram_client_concurrency)
     return _client_semaphores[client_index]
+
+
+async def prefetch_first_batch(client, message, from_bytes: int = 0):
+    """Fire-and-forget: start caching the first batch before the generator runs.
+    Skips if already cached or if the message has no document."""
+    if not message or not message.document:
+        return
+    file_size = message.document.file_size
+    if from_bytes >= file_size:
+        return
+    chat_id = message.chat.id
+    message_id = message.id
+    start_chunk = from_bytes // CHUNK_SIZE
+    cache = _cache_manager.get_cache(chat_id, message_id)
+    if cache.get(start_chunk) is not None:
+        return  # already cached
+    try:
+        c_idx = getattr(client, "pool_index", 0)
+        sem = get_client_semaphore(c_idx)
+        async with sem:
+            async for part in client.stream_media(message, limit=BATCH_SIZE, offset=start_chunk):
+                data = bytes(part)
+                cache.store(start_chunk, data)
+                start_chunk += 1
+    except Exception:
+        pass  # best-effort
 
 
 async def _retry_chunk_with_alt_client(

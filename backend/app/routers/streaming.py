@@ -13,7 +13,7 @@ from ..database import get_db
 from ..models import File, User
 from ..auth import get_current_user
 from ..telegram import get_message_from_channel, tg_client
-from ..streaming import stream_file as stream_file_chunks
+from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch
 from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -60,13 +60,13 @@ async def stream_file(
     
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
-    
+
     file_size = file.file_size
-    
+
     # Parse range header
     range_header = request.headers.get("range")
     from_bytes, until_bytes = parse_range_header(range_header, file_size)
-    
+
     # Validate range
     if (until_bytes > file_size) or (from_bytes < 0) or (from_bytes > until_bytes):
         return Response(
@@ -79,6 +79,9 @@ async def stream_file(
     message = await get_message_from_channel(file.channel_message_id)
     if not message:
         raise HTTPException(status_code=404, detail="Message not found in channel")
+
+    # Pre-fetch first batch to reduce load time
+    asyncio.create_task(prefetch_first_batch(tg_client, message, from_bytes))
 
     async def file_streamer():
         """Generator that streams file chunks from Telegram MTProto."""
@@ -237,6 +240,9 @@ async def stream_public_file(
     message = await get_message_from_channel(file.channel_message_id)
     if not message:
         raise HTTPException(status_code=404, detail="Message not found in channel")
+
+    # Pre-fetch first batch to reduce load time
+    asyncio.create_task(prefetch_first_batch(tg_client, message, from_bytes))
 
     async def file_streamer():
         """Generator that streams file chunks from Telegram MTProto."""

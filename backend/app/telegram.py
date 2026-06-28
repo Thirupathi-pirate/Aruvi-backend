@@ -151,8 +151,28 @@ async def start_telegram_client():
     return task
 
 
+async def _warmup_messages():
+    """Pre-fetch recent messages from the storage channel to warm
+    the message cache and connection pool for fast first-user response."""
+    channel_id = settings.telegram_storage_channel_id
+    if not channel_id or not tg_client.is_connected:
+        return
+    try:
+        # Fetch last 5 messages — warms the DC connection and populates _msg_cache
+        diag_log("Warming up message cache...")
+        for mid in range(1, 6):
+            msg = await tg_client.get_messages(channel_id, mid)
+            if msg and msg.id not in _msg_cache:
+                _msg_cache[msg.id] = (time.monotonic(), msg)
+                diag_log(f"Warmup: cached message {msg.id}")
+        _msg_cache_evict()
+        diag_log("Warmup complete — %d messages cached", len(_msg_cache))
+    except Exception as e:
+        diag_log(f"Warmup skipped: {e}")
+
+
 async def _finish_startup():
-    """Start helper bots in parallel, then verify storage channel access."""
+    """Start helper bots in parallel, verify storage channel access, warm up."""
     if len(clients) > 1:
         tasks = [start_one_client(i, c) for i, c in enumerate(clients[1:], 1)]
         await asyncio.gather(*tasks)
@@ -175,6 +195,9 @@ async def _finish_startup():
                 diag_log(f"Client {i} (@{me.username}): CHANNEL_INVALID — add this bot as admin to channel {channel_id}")
                 diag_log(f"  Bot token starts with: {getattr(c, 'bot_token', '?')[:8]}...")
                 diag_log(f"  Error: {e}")
+
+    # Warm up: pre-fetch recent messages so first user request is fast
+    asyncio.create_task(_warmup_messages())
 
 
 async def stop_telegram_client():

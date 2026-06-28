@@ -1,5 +1,8 @@
 # TelePlay Backend — HidenCloud Deploy
 
+## Frontend
+Pre-built TelePlay React app at `backend/app/static/` (committed to git). Served by the SPA catch-all in `main.py`. To update: rebuild locally from `github.com/Thirupathi-pirate/teleplay-frontend`, copy `dist/` to `backend/app/static/`, commit, push, restart.
+
 ## Entrypoint
 
 `run.py` at repo root delegates to `code/run.py`.

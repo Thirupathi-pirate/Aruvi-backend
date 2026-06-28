@@ -168,10 +168,12 @@ async def _warmup_messages():
         diag_log(f"Warmup done — {len(_msg_cache)} cached ({cached} new)")
     except AttributeError:
         # Fallback: get_chat_history not available, fetch one message by ID
+        diag_log("get_chat_history not available, trying fallback...")
         try:
             msg = await tg_client.get_messages(channel_id, 1)
             if msg and msg.id not in _msg_cache:
                 _msg_cache[msg.id] = (time.monotonic(), msg)
+                diag_log(f"Warmup fallback: cached message {msg.id}")
         except Exception:
             pass
     except Exception:

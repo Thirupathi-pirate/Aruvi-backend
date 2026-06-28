@@ -11,7 +11,7 @@ import logging
 from typing import AsyncGenerator
 from pathlib import Path
 
-BATCH_SIZE = 20  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
+BATCH_SIZE = 5  # chunks per stream_media call (fewer RPCs = faster; 14 clients available)
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 4 * 3600  # 4 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max

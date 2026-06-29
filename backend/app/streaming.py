@@ -504,6 +504,8 @@ async def parallel_stream_generator(
                         break
                     await asyncio.sleep(0.2)
         logger.info("REFILL done: %d batches queued for msg %d", total_queued, message_id)
+        for _ in range(concurrency):
+            await task_queue.put((None, None))
 
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
@@ -579,10 +581,13 @@ async def parallel_stream_generator(
         batch_count = 0
         logger.debug("WORKER %d bot %d: started for msg %d", worker_id, c_idx, message_id)
 
-        while not task_queue.empty():
+        while True:
             try:
-                batch_start, batch_end = task_queue.get_nowait()
-            except asyncio.QueueEmpty:
+                batch_start, batch_end = await task_queue.get()
+            except asyncio.CancelledError:
+                break
+            if batch_start is None:
+                task_queue.task_done()
                 break
             batch_count += 1
 
@@ -606,6 +611,20 @@ async def parallel_stream_generator(
                         pass
             except Exception as e:
                 logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
+
+            if batch_ok:
+                task_queue.task_done()
+                continue
+
+            # Bot disconnected — try reconnecting
+            if await reconnect_client(client):
+                logger.info("WORKER %d bot %d: reconnected, retrying batch %d-%d", worker_id, c_idx, batch_start, batch_end)
+                try:
+                    local_msg = await client.get_messages(chat_id, message_id)
+                    if local_msg:
+                        batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                except Exception as e2:
+                    logger.error("WORKER %d bot %d: retry failed: %s", worker_id, c_idx, e2)
 
             if batch_ok:
                 task_queue.task_done()

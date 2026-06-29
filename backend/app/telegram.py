@@ -152,20 +152,35 @@ async def start_telegram_client():
 
 
 async def _warmup_messages():
-    """Pre-fetch recent messages from the storage channel to warm
-    the message cache and connection pool for fast first-user response."""
+    """Pre-fetch recent messages from the storage channel using ALL bots
+    to warm message cache, connection pool, and channel entities.
+    Every connected bot fetches the same set so each one has an active
+    connection to the channel with cached file references."""
     channel_id = settings.telegram_storage_channel_id
-    if not channel_id or not tg_client.is_connected:
+    if not channel_id:
+        return
+    connected = [c for c in clients if c.is_connected]
+    if not connected:
         return
     try:
-        diag_log("Warming up...")
-        cached = 0
-        for mid in range(1, 6):
-            msg = await tg_client.get_messages(channel_id, mid)
-            if msg and msg.id not in _msg_cache:
-                _msg_cache[msg.id] = (time.monotonic(), msg)
-                cached += 1
-        diag_log(f"Warmup done — {len(_msg_cache)} cached ({cached} new)")
+        diag_log(f"Warming up {len(connected)} bot(s)...")
+        mids = list(range(1, 21))
+
+        async def _warm_one(client):
+            count = 0
+            for mid in mids:
+                try:
+                    msg = await client.get_messages(channel_id, mid)
+                    if msg and msg.id not in _msg_cache:
+                        _msg_cache[msg.id] = (time.monotonic(), msg)
+                        count += 1
+                except Exception:
+                    pass
+            return count
+
+        results = await asyncio.gather(*[_warm_one(c) for c in connected])
+        total = sum(results)
+        diag_log(f"Warmup done — all bots, {len(_msg_cache)} cached ({total} new)")
     except Exception:
         pass  # Warmup is best-effort
 

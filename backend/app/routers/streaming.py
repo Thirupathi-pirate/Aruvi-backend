@@ -12,8 +12,8 @@ from sqlalchemy import select
 from ..database import get_db
 from ..models import File, User
 from ..auth import get_current_user
-from ..telegram import get_message_from_channel, tg_client
-from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch
+from ..telegram import get_message_from_channel, tg_client, clients, diag_log
+from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, get_forward_snapshot, _dc_disk_size
 from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
@@ -285,3 +285,58 @@ async def stream_public_file(
         media_type=mime_type,
         headers=headers
     )
+
+
+@router.get("/debug")
+async def streaming_debug(
+    current_user: User = Depends(get_current_user),
+):
+    if not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    cache_info = _cache_manager.info
+    per_video = _cache_manager.per_video
+
+    disk_bytes = _dc_disk_size()
+    disk_mb = round(disk_bytes / 1024 / 1024, 1)
+
+    bots = []
+    for i, c in enumerate(clients):
+        bots.append({
+            "index": i,
+            "label": "Main" if i == 0 else f"Helper {i}",
+            "connected": c.is_connected,
+        })
+
+    forward_info = []
+    for mid in list(_forward_streams.keys()):
+        info = _forward_streams.get(mid)
+        if not info:
+            continue
+        futures = info.get("results", {})
+        done = sum(1 for f in list(futures.values()) if f.done())
+        total = info.get("total_chunks", 0)
+        forward_info.append({
+            "message_id": mid,
+            "done_futures": done,
+            "total_futures": len(futures),
+            "total_chunks": total,
+        })
+
+    return {
+        "cache": {
+            "ram_chunks": cache_info["chunks"],
+            "ram_mb": cache_info["size_mb"],
+            "hits": cache_info["hits"],
+            "misses": cache_info["misses"],
+            "evictions": cache_info["evictions"],
+            "hit_rate_pct": round(
+                cache_info["hits"] / (cache_info["hits"] + cache_info["misses"]) * 100, 1
+            ) if (cache_info["hits"] + cache_info["misses"]) > 0 else 0,
+            "per_video": per_video,
+        },
+        "disk_cache_mb": disk_mb,
+        "bots": bots,
+        "active_streams": forward_info,
+        "active_stream_count": len(forward_info),
+    }

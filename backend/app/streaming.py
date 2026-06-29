@@ -17,12 +17,11 @@ DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Sliding window: chunks within [-20, +50] of current playback position stay in RAM
-# Conservative for 3GB RAM: 70MB/stream × 5 streams = 350MB max cache
-# Excess chunks spill to NVMe disk automatically
-FWD_WINDOW = 50   # 50MB forward cache (enough for ~10s of 4K video)
-BACK_WINDOW = 20  # 20MB backward cache (enough for seek-back)
-RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 70MB total
+# Sliding window: 200MB forward + 20MB backward in RAM per stream
+# Excess spills to NVMe disk (3h TTL)
+FWD_WINDOW = 200  # 200MB forward cache
+BACK_WINDOW = 20  # 20MB backward cache (seek-back)
+RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 220MB total
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:

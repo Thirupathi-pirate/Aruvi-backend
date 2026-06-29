@@ -44,6 +44,7 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
         Path(p).write_bytes(data)
+        logger.debug("DCACHE PUT %s:%d chunk %d (%d bytes)", chat_id, message_id, chunk_idx, len(data))
     except OSError as e:
         logger.error("Disk cache write failed for %s: %s", p, e)
 
@@ -492,19 +493,24 @@ async def parallel_stream_generator(
     MAX_AHEAD = 300  # max 300MB of resolved futures ahead
 
     async def refill_queue():
+        total_queued = 0
         for rstart, rend in uncached_ranges:
             for batch_start in range(rstart, rend + 1, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE - 1, rend)
                 while True:
                     if batch_start <= video_cache.position + MAX_AHEAD:
                         await task_queue.put((batch_start, batch_end))
+                        total_queued += 1
                         break
                     await asyncio.sleep(0.2)
+        logger.info("REFILL done: %d batches queued for msg %d", total_queued, message_id)
 
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
         Forward-caches each chunk immediately so concurrent streams
         of the same file benefit before the yield loop."""
+        c_idx = getattr(cl, 'pool_index', '?')
+        logger.debug("BATCH START bot %d range %d-%d", c_idx, batch_start, batch_end)
         t0 = time.perf_counter()
         current = batch_start
         try:
@@ -519,15 +525,20 @@ async def parallel_stream_generator(
                             results[current].set_result(data)
                         current += 1
         except (asyncio.TimeoutError, ConnectionError, OSError, AuthKeyUnregistered) as e:
-            logger.warning("Bot %d batch %d-%d aborted: %s", getattr(cl, 'pool_index', '?'), batch_start, batch_end, e)
+            logger.warning("BATCH ABORT bot %d %d-%d: %s", c_idx, batch_start, batch_end, e)
             return False
         elapsed = time.perf_counter() - t0
+        nchunks = current - batch_start
         if elapsed > 2.5:
-            logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
+            logger.warning("BATCH SLOW bot %d %d-%d: %d ch in %.1fs (%.1f MB/s)", c_idx, batch_start, batch_end, nchunks, elapsed, nchunks / elapsed if elapsed else 0)
+        else:
+            logger.debug("BATCH OK bot %d %d-%d: %d ch in %.1fs", c_idx, batch_start, batch_end, nchunks, elapsed)
         return current - 1 == batch_end
 
     async def _fetch_one(chunk_offset, cl, msg, sem):
         """Fetch a single chunk, forward-caching it on success."""
+        c_idx = getattr(cl, 'pool_index', '?')
+        t0 = time.perf_counter()
         try:
             async with sem:
                 d = bytearray()
@@ -535,10 +546,13 @@ async def parallel_stream_generator(
                     d.extend(part)
             data = bytes(d)
             video_cache.store(chunk_offset, data)
+            elapsed = time.perf_counter() - t0
+            logger.debug("FETCH ONE bot %d chunk %d in %.1fs", c_idx, chunk_offset, elapsed)
             return data
         except (FileReferenceInvalid, FileReferenceExpired, AuthKeyUnregistered):
             raise
-        except Exception:
+        except Exception as e:
+            logger.warning("FETCH ONE FAIL bot %d chunk %d: %s", c_idx, chunk_offset, e)
             return None
 
     async def worker(worker_id: int):
@@ -547,28 +561,30 @@ async def parallel_stream_generator(
 
         # Skip if this helper isn't connected
         if not client.is_connected:
-            logger.error("Worker %d: helper bot %d not connected", worker_id, c_idx)
+            logger.error("WORKER %d: bot %d not connected", worker_id, c_idx)
             return
 
         # Each worker fetches its own fresh Message so file references are per-client
+        t0 = time.perf_counter()
         try:
             local_msg = await client.get_messages(chat_id, message_id)
         except Exception as e:
-            logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
+            logger.error("WORKER %d bot %d: get_messages fail: %s", worker_id, c_idx, e)
             return
         if not local_msg:
-            logger.error("Bot %d: message %d not found", c_idx, message_id)
+            logger.error("WORKER %d bot %d: message %d not found", worker_id, c_idx, message_id)
             raise FileNotFoundError(f"Message {message_id} not found in storage channel")
 
-        # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
-        # This prevents the "Request refused" or internal queue buildup in Pyrogram
         semaphore = get_client_semaphore(c_idx)
+        batch_count = 0
+        logger.debug("WORKER %d bot %d: started for msg %d", worker_id, c_idx, message_id)
 
         while not task_queue.empty():
             try:
                 batch_start, batch_end = task_queue.get_nowait()
             except asyncio.QueueEmpty:
                 break
+            batch_count += 1
 
             batch_ok = False
             try:
@@ -641,6 +657,9 @@ async def parallel_stream_generator(
                 await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
             task_queue.task_done()
 
+        elapsed = time.perf_counter() - t0
+        logger.debug("WORKER %d bot %d: done %d batches in %.1fs", worker_id, c_idx, batch_count, elapsed)
+
     # Launch workers + refill task
     refill_task = asyncio.create_task(refill_queue())
     worker_tasks = [
@@ -667,8 +686,10 @@ async def parallel_stream_generator(
                 if lookahead_idx <= end_chunk:
                     try:
                         await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass  # Don't block — yield the current chunk and continue
+                    except asyncio.TimeoutError:
+                        logger.debug("LOOKAHEAD timeout chunk %d (ahead %d), buffer cushion still has %.0f MB", chunk_idx, lookahead_idx, (offset - PREBUFFER_CHUNKS + 1))
+                    except asyncio.CancelledError:
+                        pass
             
             # Update sliding window position before cache ops
             video_cache.set_position(chunk_idx)
@@ -685,6 +706,9 @@ async def parallel_stream_generator(
                 elapsed = time.perf_counter() - stream_start
                 logger.info("Chunk %d in %.1fs (cached=%s)", chunk_idx, elapsed, cached_data is not None)
                 first_chunk_logged = True
+            elif offset % 500 == 0:
+                done_futures = sum(1 for f in list(results.values()) if f.done())
+                logger.info("VERBOSE: yielded %d, done futures %d/%d, queue %d, ram %d ch %.0f MB", chunk_idx, done_futures, total_chunks, task_queue.qsize(), len(video_cache._data), video_cache._size / 1024 / 1024)
             yield chunk_data
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
@@ -699,6 +723,7 @@ async def parallel_stream_generator(
             w.cancel()
         _cache_manager.remove(chat_id, message_id)
         elapsed = time.perf_counter() - stream_start
+        logger.debug("STREAM END msg %d: %d ch in %.1fs, peak forward %.0f MB", message_id, total_chunks, elapsed, _forward_streams.get(message_id, {}).get("results", {}))
         if total_chunks:
             logger.info("Done: %d ch, %.1f MB, %.1fs", total_chunks, bytes_yielded / 1024 / 1024, elapsed)
             cinfo = video_cache.info

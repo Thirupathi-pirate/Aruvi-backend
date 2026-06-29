@@ -11,18 +11,40 @@ import logging
 from typing import AsyncGenerator
 from pathlib import Path
 
-BATCH_SIZE = 7  # chunks per stream_media call
-CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
+BATCH_SIZE = 7  # logical chunks per stream_media call
+CHUNK_SIZE = 5 * 1024 * 1024  # 5 MB per logical chunk
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Sliding window: chunks within [-20, +50] of current playback position stay in RAM
-# Conservative for 3GB RAM: 70MB/stream × 5 streams = 350MB max cache
+# Sliding window: chunks within [-4, +10] of current playback position stay in RAM
+# Conservative for 3GB RAM: 14×5MB = 70MB/stream × 5 streams = 350MB max cache
 # Excess chunks spill to NVMe disk automatically
-FWD_WINDOW = 50   # 50MB forward cache (enough for ~10s of 4K video)
-BACK_WINDOW = 20  # 20MB backward cache (enough for seek-back)
-RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 70MB total
+FWD_WINDOW = 10   # 50MB forward (10 × 5MB)
+BACK_WINDOW = 4   # 20MB backward (4 × 5MB)
+RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * CHUNK_SIZE  # 70MB total
+
+# stream_media uses 1MB native chunks; ours are CHUNK_SIZE logical chunks
+_NATIVE_CHUNK = 1024 * 1024
+_CHUNK_MULT = CHUNK_SIZE // _NATIVE_CHUNK  # 5 for 5MB
+
+
+async def _iter_chunks(client, msg, *, offset, limit):
+    """Wrapper around stream_media: converts logical chunk indices to native 1MB
+    chunks. Yields each logical chunk as a complete bytes object."""
+    native_off = offset * _CHUNK_MULT
+    native_lim = limit * _CHUNK_MULT
+    buf = bytearray()
+    count = 0
+    async for part in client.stream_media(msg, offset=native_off, limit=native_lim):
+        buf.extend(part)
+        count += 1
+        if count >= _CHUNK_MULT:
+            yield bytes(buf)
+            buf.clear()
+            count = 0
+    if buf:
+        yield bytes(buf)
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
@@ -350,7 +372,7 @@ async def prefetch_first_batch(client, message, from_bytes: int = 0):
         if not msg:
             return
         async with sem:
-            async for part in helper.stream_media(msg, limit=BATCH_SIZE, offset=start_chunk):
+            async for part in _iter_chunks(helper, msg, offset=start_chunk, limit=BATCH_SIZE):
                 data = bytes(part)
                 cache.store(start_chunk, data)
                 start_chunk += 1
@@ -385,12 +407,9 @@ async def _retry_chunk_with_alt_client(
                 if not alt_msg:
                     continue
                 async with get_client_semaphore(alt_c_idx):
-                    data = bytearray()
-                    async for part in alt_client.stream_media(
-                        alt_msg, limit=1, offset=chunk_idx
-                    ):
-                        data.extend(part)
-                chunk_bytes = bytes(data)
+                    chunk_bytes = b""
+                    async for part in _iter_chunks(alt_client, alt_msg, offset=chunk_idx, limit=1):
+                        chunk_bytes = part
                 _cache_manager.get_cache(chat_id, message_id).store(chunk_idx, chunk_bytes)
                 if not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
@@ -402,12 +421,9 @@ async def _retry_chunk_with_alt_client(
                         alt_msg = await alt_client.get_messages(chat_id, message_id)
                         if alt_msg:
                             async with get_client_semaphore(alt_c_idx):
-                                data = bytearray()
-                                async for part in alt_client.stream_media(
-                                    alt_msg, limit=1, offset=chunk_idx
-                                ):
-                                    data.extend(part)
-                            chunk_bytes = bytes(data)
+                                chunk_bytes = b""
+                                async for part in _iter_chunks(alt_client, alt_msg, offset=chunk_idx, limit=1):
+                                    chunk_bytes = part
                             _cache_manager.get_cache(chat_id, message_id).store(chunk_idx, chunk_bytes)
                             if not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
@@ -435,7 +451,7 @@ async def parallel_stream_generator(
     initial_message,
     offset: int,
     length: int,
-    chunk_size: int = 1024 * 1024,
+    chunk_size: int = CHUNK_SIZE,
     concurrency: int = None,
 ):
     """
@@ -497,7 +513,7 @@ async def parallel_stream_generator(
     # Task queue — only filled up to MAX_AHEAD ahead of current position
     # Prevents the forward buffer of resolved futures from exhausting RAM
     task_queue = asyncio.Queue()
-    MAX_AHEAD = 300  # max 300MB of resolved futures ahead
+    MAX_AHEAD = 60  # max 300MB (60 × 5MB) of resolved futures ahead
 
     async def refill_queue():
         total_queued = 0
@@ -535,7 +551,7 @@ async def parallel_stream_generator(
         try:
             async with sem:
                 async with asyncio.timeout(60):
-                    async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
+                    async for part in _iter_chunks(cl, msg, offset=batch_start, limit=batch_end - batch_start + 1):
                         if current > batch_end:
                             break
                         data = bytes(part)
@@ -560,10 +576,9 @@ async def parallel_stream_generator(
         t0 = time.perf_counter()
         try:
             async with sem:
-                d = bytearray()
-                async for part in cl.stream_media(msg, limit=1, offset=chunk_offset):
-                    d.extend(part)
-            data = bytes(d)
+                data = b""
+                async for part in _iter_chunks(cl, msg, offset=chunk_offset, limit=1):
+                    data = part
             video_cache.store(chunk_offset, data)
             elapsed = time.perf_counter() - t0
             logger.debug("FETCH ONE bot %d chunk %d in %.1fs", c_idx, chunk_offset, elapsed)
@@ -662,10 +677,9 @@ async def parallel_stream_generator(
                     try:
                         local_msg = await client.get_messages(chat_id, message_id)
                         async with semaphore:
-                            d = bytearray()
-                            async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                d.extend(part)
-                        data = bytes(d)
+                            data = b""
+                            async for part in _iter_chunks(client, local_msg, offset=chunk_offset, limit=1):
+                                data = part
                         video_cache.store(chunk_offset, data)
                         if not results[chunk_offset].done():
                             results[chunk_offset].set_result(data)
@@ -678,10 +692,9 @@ async def parallel_stream_generator(
                         try:
                             local_msg = await client.get_messages(chat_id, message_id)
                             async with semaphore:
-                                d = bytearray()
-                                async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                    d.extend(part)
-                            data = bytes(d)
+                                data = b""
+                                async for part in _iter_chunks(client, local_msg, offset=chunk_offset, limit=1):
+                                    data = part
                             video_cache.store(chunk_offset, data)
                             if not results[chunk_offset].done():
                                 results[chunk_offset].set_result(data)
@@ -709,7 +722,7 @@ async def parallel_stream_generator(
     # From chunk 100 onward, before yielding chunk N, we wait for chunk N+100
     # to be ready. This maintains a 100MB lookahead cushion that absorbs
     # Telegram latency spikes without pausing ExoPlayer.
-    PREBUFFER_CHUNKS = 100
+    PREBUFFER_CHUNKS = 20  # 20 × 5MB = 100MB
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
@@ -725,7 +738,7 @@ async def parallel_stream_generator(
                     try:
                         await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
                     except asyncio.TimeoutError:
-                        logger.debug("LOOKAHEAD timeout chunk %d (ahead %d), buffer cushion still has %.0f MB", chunk_idx, lookahead_idx, (offset - PREBUFFER_CHUNKS + 1))
+                        logger.debug("LOOKAHEAD timeout chunk %d (ahead %d), cushion %d ch", chunk_idx, lookahead_idx, (offset - PREBUFFER_CHUNKS + 1))
                     except asyncio.CancelledError:
                         pass
             
@@ -777,7 +790,6 @@ async def stream_file(
     """Stream a file range using the multi-client pool.
     Limits concurrent streams to prevent OOM from 2 GB prebuffers stacking.
     """
-    CHUNK_SIZE = 1024 * 1024
 
     total_bytes_needed = until_bytes - from_bytes + 1
     bytes_yielded = 0

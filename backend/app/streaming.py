@@ -17,11 +17,11 @@ DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Sliding window: 300MB forward + 100MB backward in RAM per stream
+# Per-stream sliding window: 300MB forward + 100MB backward in RAM
+# Global RAM limit: 500MB across ALL streams (enforced by CacheManager)
 # Excess spills to NVMe disk (3h TTL)
-FWD_WINDOW = 300  # 300MB forward cache
-BACK_WINDOW = 100  # 100MB backward cache
-RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 400MB total
+FWD_WINDOW = 300  # 300MB forward cache per stream
+BACK_WINDOW = 100  # 100MB backward cache per stream
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
@@ -134,6 +134,7 @@ class StreamCache:
     """Position-aware sliding window cache for one video stream.
     Chunks within [-BACK_WINDOW, +FWD_WINDOW] of current playback position
     stay in RAM. Older/farther chunks are spilled to NVMe.
+    RAM is tracked globally via CacheManager (500MB across ALL streams).
     """
     def __init__(self, chat_id: int, message_id: int):
         self.chat_id = chat_id
@@ -154,6 +155,7 @@ class StreamCache:
         for idx in to_remove:
             data = self._data.pop(idx)
             self._size -= len(data)
+            _cache_manager._remove_ram(len(data))
             _dc_put(self.chat_id, self.message_id, idx, data)
             self._evictions += 1
 
@@ -165,18 +167,11 @@ class StreamCache:
         d = _dc_get(self.chat_id, self.message_id, key)
         if d is not None:
             self._hits += 1
-            # Bring back into RAM if now within window
             dist = key - self.position
             if -BACK_WINDOW <= dist <= FWD_WINDOW:
                 self._data[key] = d
                 self._size += len(d)
-                # Ensure RAM stays within budget after adding from disk
-                while self._size > RAM_MAX:
-                    farthest = max(self._data.keys(), key=lambda k: abs(k - self.position))
-                    old = self._data.pop(farthest)
-                    self._size -= len(old)
-                    _dc_put(self.chat_id, self.message_id, farthest, old)
-                    self._evictions += 1
+                _cache_manager._add_ram(len(d))
             return d
         self._misses += 1
         return None
@@ -189,17 +184,14 @@ class StreamCache:
             if key not in self._data:
                 self._data[key] = data
                 self._size += len(data)
-            while self._size > RAM_MAX:
-                farthest = max(self._data.keys(), key=lambda k: abs(k - self.position))
-                old = self._data.pop(farthest)
-                self._size -= len(old)
-                _dc_put(self.chat_id, self.message_id, farthest, old)
-                self._evictions += 1
+                _cache_manager._add_ram(len(data))
         else:
             _dc_put(self.chat_id, self.message_id, key, data)
 
     def clear(self) -> int:
         freed = self._size
+        for key, data in list(self._data.items()):
+            _cache_manager._remove_ram(len(data))
         self._data.clear()
         self._size = 0
         return freed
@@ -218,6 +210,32 @@ class StreamCache:
 class CacheManager:
     def __init__(self):
         self._caches: dict[tuple[int, int], StreamCache] = {}
+        self.ram_limit = 500 * 1024 * 1024  # 500MB global RAM limit
+        self._total_ram = 0
+
+    def _add_ram(self, delta: int):
+        self._total_ram += delta
+        while self._total_ram > self.ram_limit:
+            if not self._evict_one():
+                break
+
+    def _remove_ram(self, delta: int):
+        self._total_ram = max(0, self._total_ram - delta)
+
+    def _evict_one(self) -> bool:
+        if not self._caches:
+            return False
+        active = [c for c in self._caches.values() if c._size > 0]
+        if not active:
+            return False
+        target = max(active, key=lambda c: c._size)
+        farthest = max(target._data.keys(), key=lambda k: abs(k - target.position))
+        data = target._data.pop(farthest)
+        target._size -= len(data)
+        self._total_ram -= len(data)
+        _dc_put(target.chat_id, target.message_id, farthest, data)
+        target._evictions += 1
+        return True
 
     def get_cache(self, chat_id: int, message_id: int) -> StreamCache:
         key = (chat_id, message_id)
@@ -318,8 +336,9 @@ if not logger.handlers:
 _client_semaphores = {}
 
 # Limit total concurrent streams to prevent OOM from prebuffers stacking.
-# Each stream can hold up to 400MB in RAM cache (300fwd + 100bwd).
-# With LIMIT=5, max in-flight = 5 × 400MB = 2GB, plus ~1GB clients = 3GB.
+# Global RAM limit: 500MB across ALL streams (enforced by CacheManager).
+# Each stream holds up to 300fwd + 100bwd within position window, but
+# the 500MB global cap means evictions start well before 5 streams × 400MB.
 _stream_semaphore = asyncio.Semaphore(5)
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:

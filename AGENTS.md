@@ -43,7 +43,7 @@ All services bind `127.0.0.1` — only reachable through tunnel.
 - **Client pool** built at **module level** in `telegram.py` — `clients[0]` = main bot, `clients[1:]` = 13 helpers. Each gets `pool_index` attr.
 - **Monkey-patched Pyrogram** in `patch.py` (`PatchedClient`) — adds `wait_for_message`, `wait_for_callback_query`, fixes loop capture under uvicorn
 - **Parallel streaming** in `streaming.py` — multi-client pool, BATCH_SIZE=20
-- **Sliding window cache** — 200MB forward (pre-fetched) + 100MB backward (seek-back) in RAM per stream; remaining chunks on NVMe at `data/chunks/{chat_id}/{message_id}/{chunk_idx}`
+- **Sliding window cache** — 300MB forward + 100MB backward per stream, with a **global 500MB RAM limit** across all streams enforced by `CacheManager._evict_one()`; remaining chunks on NVMe at `data/chunks/{chat_id}/{message_id}/{chunk_idx}`
 - **Disk limit** — NVMe cache auto-evicts oldest files when exceeding 13GB (background task every hour)
 - **OOM guard** in `status.py` — percentage-based at 80% of cgroup memory limit, auto-clears RAM caches
 - **StreamCache** (`streaming.py:StreamCache`) — position-aware; `set_position(chunk_idx)` on each yield, `store()` routes within window to RAM, outside to disk; `get()` checks RAM then disk

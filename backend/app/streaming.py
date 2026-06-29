@@ -592,6 +592,7 @@ async def parallel_stream_generator(
             batch_count += 1
 
             batch_ok = False
+            batch_retried = False
             try:
                 batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
             except (FileReferenceInvalid, FileReferenceExpired):
@@ -609,6 +610,7 @@ async def parallel_stream_generator(
                         batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
                     except Exception:
                         pass
+                batch_retried = True
             except Exception as e:
                 logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
 
@@ -616,8 +618,8 @@ async def parallel_stream_generator(
                 task_queue.task_done()
                 continue
 
-            # Bot disconnected — try reconnecting
-            if await reconnect_client(client):
+            # Bot disconnected — try reconnecting (skip if already attempted for AuthKeyUnregistered)
+            if not batch_retried and await reconnect_client(client):
                 logger.info("WORKER %d bot %d: reconnected, retrying batch %d-%d", worker_id, c_idx, batch_start, batch_end)
                 try:
                     local_msg = await client.get_messages(chat_id, message_id)

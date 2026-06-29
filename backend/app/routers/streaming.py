@@ -12,8 +12,8 @@ from sqlalchemy import select
 from ..database import get_db
 from ..models import File, User
 from ..auth import get_current_user
-from ..telegram import get_message_from_channel, tg_client, clients, diag_log
-from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, get_forward_snapshot, _dc_disk_size
+from ..telegram import get_message_from_channel, tg_client, clients
+from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
 from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)

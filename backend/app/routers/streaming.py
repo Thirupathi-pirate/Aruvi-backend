@@ -12,6 +12,7 @@ from sqlalchemy import select
 from ..database import get_db
 from ..models import File, User
 from ..auth import get_current_user
+
 from ..telegram import get_message_from_channel, tg_client, clients
 from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
 from ..rate_limit import limiter
@@ -288,16 +289,28 @@ async def stream_public_file(
 
 
 @router.get("/debug")
-async def streaming_debug(
-    request: Request,
-    current_user: User = Depends(get_current_user),
-):
-    # Allow easy access with Bearer aarsha (dev convenience)
+async def streaming_debug(request: Request):
+    # Allow Bearer aarsha or valid admin JWT
     auth = request.headers.get("Authorization", "")
-    if auth == "Bearer aarsha":
-        pass  # skip admin check
-    elif not current_user.is_admin:
-        raise HTTPException(status_code=403, detail="Admin access required")
+    if auth != "Bearer aarsha":
+        try:
+            from ..auth import verify_token
+            token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
+            tid = verify_token(token) if token else None
+            if not tid:
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            from ..database import async_session
+            from ..models import User
+            from sqlalchemy import select
+            async with async_session() as db:
+                r = await db.execute(select(User).where(User.telegram_id == tid))
+                user = r.scalar_one_or_none()
+            if not user or not user.is_admin:
+                raise HTTPException(status_code=403, detail="Admin access required")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
 
     cache_info = _cache_manager.info
     per_video = _cache_manager.per_video

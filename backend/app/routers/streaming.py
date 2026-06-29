@@ -44,6 +44,78 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
     return start, min(end, file_size - 1)
 
 
+@router.get("/debug")
+async def streaming_debug(request: Request):
+    # Allow Bearer aarsha or valid admin JWT
+    auth = request.headers.get("Authorization", "")
+    if auth != "Bearer aarsha":
+        try:
+            from ..auth import verify_token
+            token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
+            tid = verify_token(token) if token else None
+            if not tid:
+                raise HTTPException(status_code=401, detail="Invalid or expired token")
+            from ..database import async_session
+            from ..models import User
+            from sqlalchemy import select
+            async with async_session() as db:
+                r = await db.execute(select(User).where(User.telegram_id == tid))
+                user = r.scalar_one_or_none()
+            if not user or not user.is_admin:
+                raise HTTPException(status_code=403, detail="Admin access required")
+        except HTTPException:
+            raise
+        except Exception:
+            raise HTTPException(status_code=401, detail="Invalid or expired token")
+
+    cache_info = _cache_manager.info
+    per_video = _cache_manager.per_video
+
+    disk_bytes = _dc_disk_size()
+    disk_mb = round(disk_bytes / 1024 / 1024, 1)
+
+    bots = []
+    for i, c in enumerate(clients):
+        bots.append({
+            "index": i,
+            "label": "Main" if i == 0 else f"Helper {i}",
+            "connected": c.is_connected,
+        })
+
+    forward_info = []
+    for mid in list(_forward_streams.keys()):
+        info = _forward_streams.get(mid)
+        if not info:
+            continue
+        futures = info.get("results", {})
+        done = sum(1 for f in list(futures.values()) if f.done())
+        total = info.get("total_chunks", 0)
+        forward_info.append({
+            "message_id": mid,
+            "done_futures": done,
+            "total_futures": len(futures),
+            "total_chunks": total,
+        })
+
+    return {
+        "cache": {
+            "ram_chunks": cache_info["chunks"],
+            "ram_mb": cache_info["size_mb"],
+            "hits": cache_info["hits"],
+            "misses": cache_info["misses"],
+            "evictions": cache_info["evictions"],
+            "hit_rate_pct": round(
+                cache_info["hits"] / (cache_info["hits"] + cache_info["misses"]) * 100, 1
+            ) if (cache_info["hits"] + cache_info["misses"]) > 0 else 0,
+            "per_video": per_video,
+        },
+        "disk_cache_mb": disk_mb,
+        "bots": bots,
+        "active_streams": forward_info,
+        "active_stream_count": len(forward_info),
+    }
+
+
 @router.get("/{file_id}")
 async def stream_file(
     file_id: int,
@@ -286,75 +358,3 @@ async def stream_public_file(
         media_type=mime_type,
         headers=headers
     )
-
-
-@router.get("/debug")
-async def streaming_debug(request: Request):
-    # Allow Bearer aarsha or valid admin JWT
-    auth = request.headers.get("Authorization", "")
-    if auth != "Bearer aarsha":
-        try:
-            from ..auth import verify_token
-            token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
-            tid = verify_token(token) if token else None
-            if not tid:
-                raise HTTPException(status_code=401, detail="Invalid or expired token")
-            from ..database import async_session
-            from ..models import User
-            from sqlalchemy import select
-            async with async_session() as db:
-                r = await db.execute(select(User).where(User.telegram_id == tid))
-                user = r.scalar_one_or_none()
-            if not user or not user.is_admin:
-                raise HTTPException(status_code=403, detail="Admin access required")
-        except HTTPException:
-            raise
-        except Exception:
-            raise HTTPException(status_code=401, detail="Invalid or expired token")
-
-    cache_info = _cache_manager.info
-    per_video = _cache_manager.per_video
-
-    disk_bytes = _dc_disk_size()
-    disk_mb = round(disk_bytes / 1024 / 1024, 1)
-
-    bots = []
-    for i, c in enumerate(clients):
-        bots.append({
-            "index": i,
-            "label": "Main" if i == 0 else f"Helper {i}",
-            "connected": c.is_connected,
-        })
-
-    forward_info = []
-    for mid in list(_forward_streams.keys()):
-        info = _forward_streams.get(mid)
-        if not info:
-            continue
-        futures = info.get("results", {})
-        done = sum(1 for f in list(futures.values()) if f.done())
-        total = info.get("total_chunks", 0)
-        forward_info.append({
-            "message_id": mid,
-            "done_futures": done,
-            "total_futures": len(futures),
-            "total_chunks": total,
-        })
-
-    return {
-        "cache": {
-            "ram_chunks": cache_info["chunks"],
-            "ram_mb": cache_info["size_mb"],
-            "hits": cache_info["hits"],
-            "misses": cache_info["misses"],
-            "evictions": cache_info["evictions"],
-            "hit_rate_pct": round(
-                cache_info["hits"] / (cache_info["hits"] + cache_info["misses"]) * 100, 1
-            ) if (cache_info["hits"] + cache_info["misses"]) > 0 else 0,
-            "per_video": per_video,
-        },
-        "disk_cache_mb": disk_mb,
-        "bots": bots,
-        "active_streams": forward_info,
-        "active_stream_count": len(forward_info),
-    }

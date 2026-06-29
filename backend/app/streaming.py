@@ -735,7 +735,6 @@ async def parallel_stream_generator(
     PREBUFFER_CHUNKS = 100
     stream_start = time.perf_counter()
     first_chunk_logged = False
-    cache_served = 0
     bytes_yielded = 0
     try:
         for offset in range(total_chunks):
@@ -757,7 +756,6 @@ async def parallel_stream_generator(
             cached_data = video_cache.get(chunk_idx)
             if cached_data is not None:
                 chunk_data = cached_data
-                cache_served += 1
             else:
                 chunk_data = await results[chunk_idx]
                 video_cache.store(chunk_idx, chunk_data)

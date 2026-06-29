@@ -2,8 +2,10 @@
 PyroTGFork MTProto client for Telegram interactions.
 Handles both bot commands and file streaming via a client pool.
 """
+import re
 import time
 import os
+import traceback
 from .patch import Client
 from pyrogram.types import Message
 from .config import get_settings
@@ -84,7 +86,6 @@ async def start_one_client(i, c):
             err_str = str(e).lower()
             # Flood wait: sleep and retry
             if "flood_wait" in err_str or "flood" in err_str:
-                import re
                 match = re.search(r"(\d+)", err_str)
                 wait = min(int(match.group(1)) if match else 60, 120)
                 diag_log(f"Client {i}: flood wait {wait}s, retrying...")
@@ -95,7 +96,6 @@ async def start_one_client(i, c):
                 diag_log(f"Client {i}: transient error (attempt {attempt}): {e}. Retrying in {delay}s...")
                 await asyncio.sleep(delay)
                 continue
-            import traceback
             tb = traceback.format_exc()
             diag_log(f"Client {i} failed to start after {max_attempts} attempts: {e}\n{tb}")
     # If all attempts exhausted and this is main bot, propagate failure

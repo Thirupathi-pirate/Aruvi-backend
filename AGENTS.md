@@ -42,7 +42,7 @@ All services bind `127.0.0.1` — only reachable through tunnel.
 - **Bot handlers** registered via `from . import bot` (side-effect) — decorators `@tg_client.on_message`, `@tg_client.on_callback_query`
 - **Client pool** built at **module level** in `telegram.py` — `clients[0]` = main bot, `clients[1:]` = 13 helpers. Each gets `pool_index` attr.
 - **Monkey-patched Pyrogram** in `patch.py` (`PatchedClient`) — adds `wait_for_message`, `wait_for_callback_query`, fixes loop capture under uvicorn
-- **Parallel streaming** in `streaming.py` — multi-client pool, BATCH_SIZE=20
+- **Parallel streaming** in `streaming.py` — multi-client pool, BATCH_SIZE=5 (5×1MB chunks per bot batch), fast-start (1-chunk parallel across all bots)
 - **Sliding window cache** — 300MB forward + 100MB backward per stream, with a **global 500MB RAM limit** across all streams enforced by `CacheManager._evict_one()`; remaining chunks on NVMe at `data/chunks/{chat_id}/{message_id}/{chunk_idx}`
 - **Disk limit** — NVMe cache auto-evicts oldest files when exceeding 13GB (background task every hour)
 - **OOM guard** in `status.py` — percentage-based at 80% of cgroup memory limit, auto-clears RAM caches
@@ -77,7 +77,7 @@ Reads from `.env` via pydantic-settings. Key fields:
 ## Platform quirks
 
 - **ARM64** — `TgCrypto-pyrofork` for pre-built wheels, `cloudflared-linux-arm64` binary
-- **3GB RAM** — sliding window 300MB×5 streams=1500MB max, app ~700MB, ~800MB headroom
+- **3GB RAM** — global 500MB limit across all streams via `CacheManager._evict_one()`, app ~700MB, ~1.8GB headroom
 - **No SSH** — debug via opencode Web UI at `REDACTED_DOMAIN`
 - **`MEMORY=3Gi`** env var — status page reads this for accurate RAM display
 

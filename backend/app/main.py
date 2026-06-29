@@ -215,6 +215,10 @@ async def diagnostic():
     }
 
 
+@app.get("/api/v")
+async def api_v():
+    return {"v": 2, "commit": "33c4c1a57a7a"}
+
 @app.get("/api/status")
 async def api_status():
     return get_status()

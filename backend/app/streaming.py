@@ -17,11 +17,11 @@ DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Sliding window: 200MB forward + 60MB backward in RAM per stream
+# Sliding window: 300MB forward + 100MB backward in RAM per stream
 # Excess spills to NVMe disk (3h TTL)
-FWD_WINDOW = 200  # 200MB forward cache
-BACK_WINDOW = 60  # 60MB backward cache (seek-back)
-RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 260MB total
+FWD_WINDOW = 300  # 300MB forward cache
+BACK_WINDOW = 100  # 100MB backward cache
+RAM_MAX = (FWD_WINDOW + BACK_WINDOW) * 1024 * 1024  # 400MB total
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
@@ -170,6 +170,13 @@ class StreamCache:
             if -BACK_WINDOW <= dist <= FWD_WINDOW:
                 self._data[key] = d
                 self._size += len(d)
+                # Ensure RAM stays within budget after adding from disk
+                while self._size > RAM_MAX:
+                    farthest = max(self._data.keys(), key=lambda k: abs(k - self.position))
+                    old = self._data.pop(farthest)
+                    self._size -= len(old)
+                    _dc_put(self.chat_id, self.message_id, farthest, old)
+                    self._evictions += 1
             return d
         self._misses += 1
         return None
@@ -310,9 +317,9 @@ if not logger.handlers:
 # Global semaphores to limit concurrency per client across all streams
 _client_semaphores = {}
 
-# Limit total concurrent streams to prevent OOM from 2 GB prebuffers stacking.
-# Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
-# With LIMIT=5, max in-flight = 5 × 200 MB = 1 GB, headroom on 3 GB machine.
+# Limit total concurrent streams to prevent OOM from prebuffers stacking.
+# Each stream can hold up to 400MB in RAM cache (300fwd + 100bwd).
+# With LIMIT=5, max in-flight = 5 × 400MB = 2GB, plus ~1GB clients = 3GB.
 _stream_semaphore = asyncio.Semaphore(5)
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
@@ -722,7 +729,7 @@ async def parallel_stream_generator(
                     try:
                         await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
                     except asyncio.TimeoutError:
-                        logger.debug("LOOKAHEAD timeout chunk %d (ahead %d), buffer cushion still has %.0f MB", chunk_idx, lookahead_idx, (offset - PREBUFFER_CHUNKS + 1))
+                        logger.debug("LOOKAHEAD timeout chunk %d (ahead %d), cushion %d ch", chunk_idx, lookahead_idx, (offset - PREBUFFER_CHUNKS + 1))
                     except asyncio.CancelledError:
                         pass
             

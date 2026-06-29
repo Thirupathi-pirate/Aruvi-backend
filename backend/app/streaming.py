@@ -327,6 +327,7 @@ def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
 
 async def prefetch_first_batch(client, message, from_bytes: int = 0):
     """Fire-and-forget: start caching the first batch before the generator runs.
+    Uses a helper bot (not bot 0) for faster first-byte latency.
     Skips if already cached or if the message has no document."""
     if not message or not message.document:
         return
@@ -340,10 +341,16 @@ async def prefetch_first_batch(client, message, from_bytes: int = 0):
     if cache.get(start_chunk) is not None:
         return  # already cached
     try:
-        c_idx = getattr(client, "pool_index", 0)
+        helper = next((c for c in clients if getattr(c, 'pool_index', 0) != 0 and c.is_connected), None)
+        if not helper:
+            helper = client
+        c_idx = getattr(helper, "pool_index", 0)
         sem = get_client_semaphore(c_idx)
+        msg = await helper.get_messages(chat_id, message_id)
+        if not msg:
+            return
         async with sem:
-            async for part in client.stream_media(message, limit=BATCH_SIZE, offset=start_chunk):
+            async for part in helper.stream_media(msg, limit=BATCH_SIZE, offset=start_chunk):
                 data = bytes(part)
                 cache.store(start_chunk, data)
                 start_chunk += 1
@@ -495,7 +502,17 @@ async def parallel_stream_generator(
     async def refill_queue():
         total_queued = 0
         for rstart, rend in uncached_ranges:
-            for batch_start in range(rstart, rend + 1, BATCH_SIZE):
+            # Fast-start: first N chunks as 1-chunk batches (parallel across all bots)
+            fast_count = min(concurrency, rend - rstart + 1)
+            for i in range(fast_count):
+                while True:
+                    if rstart + i <= video_cache.position + MAX_AHEAD:
+                        await task_queue.put((rstart + i, rstart + i))
+                        total_queued += 1
+                        break
+                    await asyncio.sleep(0.2)
+
+            for batch_start in range(rstart + fast_count, rend + 1, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE - 1, rend)
                 while True:
                     if batch_start <= video_cache.position + MAX_AHEAD:

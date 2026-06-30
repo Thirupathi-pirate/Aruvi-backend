@@ -19,13 +19,12 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from .config import get_settings
-from .telegram import tg_client
+from .streaming import parallel_stream_generator
 
 _log = logging.getLogger(__name__)
 settings = get_settings()
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-CHUNK_SIZE = 1024 * 1024  # 1MB — matches pyrotgfork's hardcoded chunk size
 
 # In-memory nonce store for OAuth CSRF protection
 # {nonce: (telegram_id, timestamp, code_verifier)}
@@ -195,9 +194,6 @@ async def ensure_aruvi_folder(service) -> str:
     return folder["id"]
 
 
-UPLOAD_BLOCK_SIZE = 8 * 1024 * 1024  # 8MB per PUT request
-
-
 async def upload_streaming(
     token_dict: dict,
     msg: "Message",
@@ -208,9 +204,9 @@ async def upload_streaming(
     progress_callback=None,
 ) -> str:
     """Stream a Telegram Message directly to Google Drive using the
-    resumable upload protocol.  No temp file is written.
+    resumable upload protocol.  Uses the multi-client pool (13 bots)
+    for parallel download — same speed as video streaming.
 
-    Buffers 1MB Telegram chunks into 8MB blocks to reduce HTTP round trips.
     Returns the webViewLink to the uploaded file.
     """
     access_token = get_access_token(token_dict)
@@ -240,31 +236,13 @@ async def upload_streaming(
         uploaded = 0
         total = file_size
         resp = None
-        buf = bytearray()
 
-        async for chunk in tg_client.stream_media(msg):
-            chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
-            buf.extend(chunk_bytes)
-
-            if len(buf) >= UPLOAD_BLOCK_SIZE:
-                block = bytes(buf)
-                buf.clear()
-                start = uploaded
-                end = uploaded + len(block) - 1
-                resp = await _upload_block(client, upload_url, block, start, end, total)
-                uploaded += len(block)
-
-                if progress_callback:
-                    await progress_callback(uploaded, total)
-
-        # Upload remaining bytes
-        if buf:
-            block = bytes(buf)
-            buf.clear()
+        async for chunk_data in parallel_stream_generator(msg, from_bytes=0, total_bytes=file_size):
+            chunk_bytes = chunk_data if isinstance(chunk_data, bytes) else bytes(chunk_data)
             start = uploaded
-            end = uploaded + len(block) - 1
-            resp = await _upload_block(client, upload_url, block, start, end, total)
-            uploaded += len(block)
+            end = uploaded + len(chunk_bytes) - 1
+            resp = await _upload_block(client, upload_url, chunk_bytes, start, end, total)
+            uploaded += len(chunk_bytes)
 
             if progress_callback:
                 await progress_callback(uploaded, total)

@@ -141,14 +141,35 @@ async def reconnect_client(client: Client) -> bool:
 
 
 async def start_telegram_client():
-    """Called from app lifespan — starts main bot immediately, helpers in background.
-    
-    Returns the background task so the caller can cancel it on shutdown.
-    """
-    await start_one_client(0, clients[0])
-    diag_log("Main client started — app is ready to serve")
-    task = asyncio.create_task(_finish_startup())
-    return task
+    """Called from app lifespan — connects ALL bots before server is ready."""
+    tasks = [start_one_client(i, c) for i, c in enumerate(clients)]
+    await asyncio.gather(*tasks)
+    diag_log(f"All {len(clients)} client(s) connected — app is ready to serve")
+
+    # Verify each bot can access the storage channel
+    channel_id = settings.telegram_storage_channel_id
+    if channel_id:
+        for i, c in enumerate(clients):
+            if not c.is_connected:
+                diag_log(f"Client {i}: skipped channel check (not connected)")
+                continue
+            try:
+                me = await c.get_me()
+                msg = await c.get_messages(channel_id, 1)
+                if msg:
+                    diag_log(f"Client {i} (@{me.username}): channel access OK")
+                else:
+                    diag_log(f"Client {i} (@{me.username}): channel returned empty — add bot as admin")
+            except Exception as e:
+                diag_log(f"Client {i} (@{me.username}): CHANNEL_INVALID — add this bot as admin to channel {channel_id}")
+
+    # Pre-fetch recent messages for warm cache
+    asyncio.create_task(_warmup_messages())
+
+    # Return a dummy completed task so main.py's shutdown logic doesn't break
+    dummy = asyncio.get_running_loop().create_future()
+    dummy.set_result(None)
+    return dummy
 
 
 async def _warmup_messages():

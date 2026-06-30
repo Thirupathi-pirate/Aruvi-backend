@@ -20,6 +20,7 @@ from googleapiclient.discovery import build
 
 from .config import get_settings
 from .streaming import parallel_stream_generator
+from .telegram import tg_client
 
 _log = logging.getLogger(__name__)
 settings = get_settings()
@@ -237,15 +238,30 @@ async def upload_streaming(
         total = file_size
         resp = None
 
-        async for chunk_data in parallel_stream_generator(msg, from_bytes=0, total_bytes=file_size):
-            chunk_bytes = chunk_data if isinstance(chunk_data, bytes) else bytes(chunk_data)
-            start = uploaded
-            end = uploaded + len(chunk_bytes) - 1
-            resp = await _upload_block(client, upload_url, chunk_bytes, start, end, total)
-            uploaded += len(chunk_bytes)
+        # Fast first chunk via single bot (instant response, ~1s)
+        is_first = True
+        async for chunk in tg_client.stream_media(msg, limit=1, offset=0):
+            chunk_bytes = bytes(chunk) if not isinstance(chunk, bytes) else chunk
+            if is_first:
+                start = 0
+                end = len(chunk_bytes) - 1
+                resp = await _upload_block(client, upload_url, chunk_bytes, start, end, total)
+                uploaded += len(chunk_bytes)
+                if progress_callback:
+                    await progress_callback(uploaded, total)
+                is_first = False
+        # Only reached if stream_media yielded nothing (empty file)
 
-            if progress_callback:
-                await progress_callback(uploaded, total)
+        # Remaining via multi-bot parallel stream
+        if uploaded < total:
+            async for chunk_data in parallel_stream_generator(msg, offset=uploaded, length=total - uploaded):
+                chunk_bytes = chunk_data if isinstance(chunk_data, bytes) else bytes(chunk_data)
+                start = uploaded
+                end = uploaded + len(chunk_bytes) - 1
+                resp = await _upload_block(client, upload_url, chunk_bytes, start, end, total)
+                uploaded += len(chunk_bytes)
+                if progress_callback:
+                    await progress_callback(uploaded, total)
 
     if resp is None:
         raise RuntimeError("No chunks were uploaded (empty file?)")

@@ -20,6 +20,18 @@ security = HTTPBearer(auto_error=False)
 
 
 
+def create_download_token(telegram_id: int, version: int = 0) -> str:
+    """Create a JWT download token valid for 30 days."""
+    expire = datetime.now(timezone.utc) + timedelta(days=30)
+    payload = {
+        "sub": str(telegram_id),
+        "exp": expire,
+        "type": "access",
+        "ver": version
+    }
+    return jwt.encode(payload, settings.jwt_secret, algorithm="HS256")
+
+
 def create_access_token(telegram_id: int, version: int = 0) -> str:
     """Create a JWT access token."""
     expire = datetime.now(timezone.utc) + timedelta(minutes=settings.jwt_expiry_minutes)

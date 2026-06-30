@@ -18,7 +18,7 @@ from .telegram import tg_client, forward_to_storage_channel, invalidate_message_
 from .database import async_session
 from .models import User, File, Folder, LoginCode
 from .config import get_settings
-from .auth import create_access_token
+from .auth import create_access_token, create_download_token
 from . import gdrive as gdrive_mod
 
 settings = get_settings()
@@ -1273,7 +1273,7 @@ async def handle_callback(client, callback: CallbackQuery):
             file_size = file.file_size
             file_type = file.file_type
 
-        token = create_access_token(callback.from_user.id)
+        token = create_download_token(callback.from_user.id)
         from urllib.parse import quote
         download_url = (
             f"{settings.web_base_url}/api/stream/{file_id}"
@@ -1287,7 +1287,7 @@ async def handle_callback(client, callback: CallbackQuery):
             f"🔗 **Download Link:**\n"
             f"{download_url}\n\n"
             "Tap the link above or copy it to your browser to download.\n"
-            "__(Link expires in 7 days)__"
+            "__(Link expires in 30 days)__"
         )
 
     elif data.startswith("savetodrive:"):

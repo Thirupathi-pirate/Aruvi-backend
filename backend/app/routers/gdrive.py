@@ -12,7 +12,7 @@ from fastapi.responses import HTMLResponse, RedirectResponse
 
 from ..database import async_session
 from ..models import User
-from ..gdrive import exchange_code, verify_nonce, generate_auth_url, pop_code_verifier
+from ..gdrive import exchange_code, consume_state, generate_auth_url
 from ..config import get_settings
 from ..auth import get_current_user_opt
 from sqlalchemy import select
@@ -65,15 +65,7 @@ async def gdrive_auth_callback(request: Request):
         )
 
     try:
-        telegram_id = verify_nonce(state)
-    except ValueError as e:
-        return HTMLResponse(
-            f"<h2>❌ {e}</h2>",
-            status_code=400,
-        )
-
-    try:
-        code_verifier = pop_code_verifier(state)
+        telegram_id, code_verifier = consume_state(state)
     except ValueError as e:
         return HTMLResponse(
             f"<h2>❌ {e}</h2>",

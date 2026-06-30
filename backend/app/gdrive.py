@@ -87,8 +87,8 @@ def generate_auth_url(telegram_id: int) -> str:
     return auth_url
 
 
-def verify_nonce(state: str) -> int:
-    """Verify the OAuth state and return the telegram_id.
+def consume_state(state: str) -> tuple[int, str]:
+    """Verify and consume the OAuth state, returning (telegram_id, code_verifier).
     Raises ValueError if the nonce is invalid or expired.
     """
     _prune_nonces()
@@ -101,10 +101,10 @@ def verify_nonce(state: str) -> int:
     stored = _nonce_store.pop(nonce, None)
     if stored is None:
         raise ValueError("Invalid or expired nonce — please re-authorize")
-    stored_id, _ = stored[:2]
+    stored_id, _, code_verifier = stored
     if stored_id != telegram_id:
         raise ValueError("telegram_id mismatch in state")
-    return telegram_id
+    return telegram_id, code_verifier
 
 
 def exchange_code(code: str, code_verifier: str) -> dict:
@@ -117,19 +117,6 @@ def exchange_code(code: str, code_verifier: str) -> dict:
     flow.fetch_token(code=code, code_verifier=code_verifier)
     creds = flow.credentials
     return _creds_to_dict(creds)
-
-
-def pop_code_verifier(state: str) -> str:
-    """Retrieve and remove the code_verifier for a given state."""
-    _prune_nonces()
-    try:
-        _, nonce = state.split(":", 1)
-    except (ValueError, IndexError):
-        raise ValueError("Invalid state format")
-    stored = _nonce_store.pop(nonce, None)
-    if stored is None:
-        raise ValueError("Invalid or expired nonce — please re-authorize")
-    return stored[2]
 
 
 def _creds_to_dict(creds: UserCredentials) -> dict:

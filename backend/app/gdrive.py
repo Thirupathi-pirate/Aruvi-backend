@@ -39,7 +39,7 @@ def _prune_nonces():
 
 
 def _flow() -> Flow:
-    return Flow.from_client_config(
+    flow = Flow.from_client_config(
         {
             "web": {
                 "client_id": settings.gdrive_client_id,
@@ -51,6 +51,8 @@ def _flow() -> Flow:
         },
         scopes=SCOPES,
     )
+    flow.redirect_uri = settings.gdrive_redirect_uri
+    return flow
 
 
 def generate_auth_url(telegram_id: int) -> str:

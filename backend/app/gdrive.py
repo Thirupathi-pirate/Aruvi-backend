@@ -195,6 +195,9 @@ async def ensure_aruvi_folder(service) -> str:
     return folder["id"]
 
 
+UPLOAD_BLOCK_SIZE = 8 * 1024 * 1024  # 8MB per PUT request
+
+
 async def upload_streaming(
     token_dict: dict,
     msg: "Message",
@@ -207,11 +210,11 @@ async def upload_streaming(
     """Stream a Telegram Message directly to Google Drive using the
     resumable upload protocol.  No temp file is written.
 
+    Buffers 1MB Telegram chunks into 8MB blocks to reduce HTTP round trips.
     Returns the webViewLink to the uploaded file.
     """
     access_token = get_access_token(token_dict)
 
-    # 1. Start resumable upload session
     metadata = json.dumps(
         {
             "name": file_name,
@@ -235,44 +238,37 @@ async def upload_streaming(
         upload_url = session_resp.headers["Location"]
 
         uploaded = 0
+        total = file_size
         resp = None
+        buf = bytearray()
+
         async for chunk in tg_client.stream_media(msg):
             chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
+            buf.extend(chunk_bytes)
+
+            if len(buf) >= UPLOAD_BLOCK_SIZE:
+                block = bytes(buf)
+                buf.clear()
+                start = uploaded
+                end = uploaded + len(block) - 1
+                resp = await _upload_block(client, upload_url, block, start, end, total)
+                uploaded += len(block)
+
+                if progress_callback:
+                    await progress_callback(uploaded, total)
+
+        # Upload remaining bytes
+        if buf:
+            block = bytes(buf)
+            buf.clear()
             start = uploaded
-            end = uploaded + len(chunk_bytes) - 1
-            total = file_size
-
-            # Retry up to 3 times for transient failures
-            last_error = None
-            for attempt in range(3):
-                try:
-                    resp = await client.put(
-                        upload_url,
-                        headers={
-                            "Content-Range": f"bytes {start}-{end}/{total}",
-                            "Content-Length": str(len(chunk_bytes)),
-                        },
-                        content=chunk_bytes,
-                    )
-                    if resp.status_code in (200, 201, 308):
-                        break
-                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
-                    if resp.status_code < 500 and resp.status_code != 429:
-                        break
-                except (httpx.TimeoutException, httpx.NetworkError) as e:
-                    last_error = str(e)
-                await asyncio.sleep(1 * (attempt + 1))
-            else:
-                raise RuntimeError(
-                    f"Upload chunk failed after 3 retries: {last_error}"
-                )
-
-            uploaded += len(chunk_bytes)
+            end = uploaded + len(block) - 1
+            resp = await _upload_block(client, upload_url, block, start, end, total)
+            uploaded += len(block)
 
             if progress_callback:
                 await progress_callback(uploaded, total)
 
-    # 3. Retrieve the uploaded file's webViewLink
     if resp is None:
         raise RuntimeError("No chunks were uploaded (empty file?)")
 
@@ -291,3 +287,30 @@ async def upload_streaming(
         "webViewLink",
         f"https://drive.google.com/file/d/{file_id}/view",
     )
+
+
+async def _upload_block(
+    client: httpx.AsyncClient, upload_url: str, block: bytes,
+    start: int, end: int, total: int,
+) -> httpx.Response:
+    """Upload a single block with retries."""
+    last_error = None
+    for attempt in range(3):
+        try:
+            resp = await client.put(
+                upload_url,
+                headers={
+                    "Content-Range": f"bytes {start}-{end}/{total}",
+                    "Content-Length": str(len(block)),
+                },
+                content=block,
+            )
+            if resp.status_code in (200, 201, 308):
+                return resp
+            last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+            if resp.status_code < 500 and resp.status_code != 429:
+                break
+        except (httpx.TimeoutException, httpx.NetworkError) as e:
+            last_error = str(e)
+        await asyncio.sleep(1 * (attempt + 1))
+    raise RuntimeError(f"Upload block failed after 3 retries: {last_error}")

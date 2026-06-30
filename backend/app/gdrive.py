@@ -11,7 +11,6 @@ import secrets
 import time
 from base64 import urlsafe_b64encode
 from datetime import datetime
-from pathlib import Path
 
 import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -195,12 +194,6 @@ async def ensure_aruvi_folder(service) -> str:
     return folder["id"]
 
 
-GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
-UPLOAD_CONCURRENCY = 8
-CHUNK_SIZE = 1024 * 1024
-MAX_GDRIVE_FILE = 4 * 1024 * 1024 * 1024
-
-
 async def upload_streaming(
     token_dict: dict,
     msg: "Message",
@@ -210,13 +203,12 @@ async def upload_streaming(
     folder_id: str,
     progress_callback=None,
 ) -> str:
-    """Download the full file to NVMe temp (via 13-bot parallel streaming),
-    then upload to Google Drive with 8 concurrent PUT workers.
-    Deletes the temp file after upload.
-    """
-    if file_size > MAX_GDRIVE_FILE:
-        raise ValueError("File exceeds 4GB limit for GDrive upload")
+    """Stream a Telegram Message directly to Google Drive using the
+    resumable upload protocol.  Uses the multi-client pool (13 bots)
+    for parallel download — same speed as video streaming.
 
+    Returns the webViewLink to the uploaded file.
+    """
     access_token = get_access_token(token_dict)
 
     metadata = json.dumps(
@@ -241,76 +233,19 @@ async def upload_streaming(
         session_resp.raise_for_status()
         upload_url = session_resp.headers["Location"]
 
+        uploaded = 0
         total = file_size
+        resp = None
 
-        # ── Phase 1: Download full file to NVMe temp (13-bot parallel) ──
-        GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = GDRIVE_UPLOAD_DIR / f"{msg.id}_{int(time.time())}.tmp"
+        async for chunk_data in parallel_stream_generator(msg, from_bytes=0, total_bytes=file_size):
+            chunk_bytes = chunk_data if isinstance(chunk_data, bytes) else bytes(chunk_data)
+            start = uploaded
+            end = uploaded + len(chunk_bytes) - 1
+            resp = await _upload_block(client, upload_url, chunk_bytes, start, end, total)
+            uploaded += len(chunk_bytes)
 
-        try:
-            downloaded = 0
-            with open(tmp, "wb") as f:
-                async for chunk in parallel_stream_generator(msg, offset=0, length=total):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(downloaded, total)
-
-            # ── Phase 2: Upload concurrently to Drive ──
-            queue: asyncio.Queue = asyncio.Queue(maxsize=UPLOAD_CONCURRENCY * 2)
-            all_responses: list[httpx.Response] = []
-            errors: list[Exception] = []
-
-            async def upload_worker():
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        queue.task_done()
-                        break
-                    start, end, chunk = item
-                    try:
-                        r = await _upload_block(client, upload_url, chunk, start, end, total)
-                        all_responses.append(r)
-                    except Exception as e:
-                        errors.append(e)
-                    finally:
-                        queue.task_done()
-
-            workers = [asyncio.create_task(upload_worker()) for _ in range(UPLOAD_CONCURRENCY)]
-
-            uploaded = 0
-            with open(tmp, "rb") as f:
-                while True:
-                    if errors:
-                        break
-                    chunk = f.read(CHUNK_SIZE)
-                    if not chunk:
-                        break
-                    start = uploaded
-                    end = uploaded + len(chunk) - 1
-                    await queue.put((start, end, chunk))
-                    uploaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(uploaded, total)
-
-            for _ in range(UPLOAD_CONCURRENCY):
-                await queue.put(None)
-
-            await asyncio.gather(*workers)
-
-            if errors:
-                raise RuntimeError(f"Upload chunk failed: {errors[0]}")
-
-            resp = None
-            for r in all_responses:
-                if r.status_code in (200, 201):
-                    resp = r
-                    break
-            if resp is None:
-                raise RuntimeError("Upload did not complete — no 200/201 response from Drive")
-
-        finally:
-            tmp.unlink(missing_ok=True)
+            if progress_callback:
+                await progress_callback(uploaded, total)
 
     if resp is None:
         raise RuntimeError("No chunks were uploaded (empty file?)")

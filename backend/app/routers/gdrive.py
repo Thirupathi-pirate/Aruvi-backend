@@ -22,6 +22,78 @@ router = APIRouter(prefix="/gdrive", tags=["GDrive"])
 settings = get_settings()
 
 
+PAGE_CSS = """\
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{
+font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif;
+background:#e8eaed;display:flex;align-items:center;justify-content:center;
+min-height:100vh;margin:0;padding:20px;
+}
+.card{
+background:#fff;border-radius:24px;padding:48px 40px 40px;
+max-width:400px;width:100%;text-align:center;
+box-shadow:0 1px 3px rgba(0,0,0,.08),0 4px 24px rgba(0,0,0,.06);
+}
+.icon-wrap{width:72px;height:72px;border-radius:50%;display:flex;
+align-items:center;justify-content:center;margin:0 auto 24px;
+background:#e8f5e9;
+}
+.icon-wrap svg{width:40px;height:40px}
+h1{font-size:22px;font-weight:600;color:#202124;margin-bottom:8px}
+p{font-size:14px;color:#5f6368;line-height:1.5;margin-bottom:4px}
+.sub{font-size:13px;color:#9aa0a6;margin-top:16px;padding:0 8px}
+.badge{display:inline-block;background:#f1f3f4;border-radius:16px;
+padding:6px 16px;font-size:13px;color:#5f6368;margin-top:20px}
+.badge svg{vertical-align:middle;margin-right:4px}
+.btn{display:block;background:#1a73e8;color:#fff;text-decoration:none;
+padding:12px;border-radius:20px;font-size:14px;font-weight:500;
+margin-top:28px;transition:background .2s}
+.btn:hover{background:#1557b0}
+.error .icon-wrap{background:#fce8e6}
+.error .icon-wrap svg .check{stroke:#d93025}
+</style>"""
+
+CHECK_SVG = """\
+<svg viewBox="0 0 24 24" fill="none" stroke="#1e8e3e" stroke-width="2.5"
+stroke-linecap="round" stroke-linejoin="round">
+<circle cx="12" cy="12" r="10" stroke="#1e8e3e" fill="none" opacity="0.2"/>
+<path class="check" d="M7 13l3 3 7-7"/>
+</svg>"""
+
+CROSS_SVG = """\
+<svg viewBox="0 0 24 24" fill="none" stroke="#d93025" stroke-width="2.5"
+stroke-linecap="round" stroke-linejoin="round">
+<circle cx="12" cy="12" r="10" stroke="#d93025" fill="none" opacity="0.2"/>
+<path class="check" d="M8 8l8 8M16 8l-8 8"/>
+</svg>"""
+
+DRIVE_SVG = """\
+<svg viewBox="0 0 24 24" fill="#5f6368" width="14" height="14">
+<path d="M12 2L2 18h8l2-4 2 4h8L12 2zM2 20v2h20v-2H2z"/>
+</svg>"""
+
+
+def _page(icon_svg: str, title: str, body: str, extra: str = "", is_error: bool = False) -> str:
+    cls = " error" if is_error else ""
+    home = settings.web_base_url
+    return f"""\
+<!DOCTYPE html>
+<html lang="en">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
+<title>{title} — Aruvi</title>{PAGE_CSS}</head>
+<body>
+<div class="card{cls}">
+<div class="icon-wrap">{icon_svg}</div>
+<h1>{title}</h1>
+<p>{body}</p>
+{extra}
+<a class="btn" href="{home}">Go to Aruvi</a>
+</div>
+</body>
+</html>"""
+
+
 async def _resolve_user(request: Request):
     """Extract token from query, verify it, return User or None."""
     token = request.query_params.get("token")
@@ -56,15 +128,18 @@ async def gdrive_auth(request: Request):
     user = await _resolve_user(request)
     if not user:
         return HTMLResponse(
-            "<h2>❌ Authentication required.</h2>"
-            "<p>Please login via Telegram first.</p>",
+            _page(CROSS_SVG, "Authentication required",
+                  "Please login via Telegram first.",
+                  '<p class="sub">Use /web in the bot to get a login link.</p>',
+                  is_error=True),
             status_code=401,
         )
 
     if user.gdrive_token:
         return HTMLResponse(
-            "<h2>✅ Google Drive already connected.</h2>"
-            "<p>You can close this tab.</p>"
+            _page(CHECK_SVG, "Already connected",
+                  "Your Google Drive is already linked to Aruvi.",
+                  '<div class="badge">' + DRIVE_SVG + ' Google Drive · Connected</div>')
         )
 
     auth_url = generate_auth_url(user.telegram_id)
@@ -79,13 +154,18 @@ async def gdrive_auth_callback(request: Request):
 
     if error:
         return HTMLResponse(
-            f"<h2>❌ Authorization denied.</h2><p>{error}</p>",
+            _page(CROSS_SVG, "Authorization denied",
+                  "You denied the Google Drive connection request.",
+                  f"<p class=\"sub\">{error}</p>",
+                  is_error=True),
             status_code=400,
         )
 
     if not code or not state:
         return HTMLResponse(
-            "<h2>❌ Missing code or state parameter.</h2>",
+            _page(CROSS_SVG, "Missing parameters",
+                  "The callback URL is missing required parameters.",
+                  is_error=True),
             status_code=400,
         )
 
@@ -93,7 +173,10 @@ async def gdrive_auth_callback(request: Request):
         telegram_id, code_verifier = consume_state(state)
     except ValueError as e:
         return HTMLResponse(
-            f"<h2>❌ {e}</h2>",
+            _page(CROSS_SVG, "Session expired",
+                  str(e),
+                  '<p class="sub">Please tap "Save to Drive" again in Telegram.</p>',
+                  is_error=True),
             status_code=400,
         )
 
@@ -102,7 +185,10 @@ async def gdrive_auth_callback(request: Request):
     except Exception as e:
         _log.exception("GDrive token exchange failed for user %s", telegram_id)
         return HTMLResponse(
-            f"<h2>❌ Token exchange failed.</h2><p>{e}</p>",
+            _page(CROSS_SVG, "Token exchange failed",
+                  str(e),
+                  '<p class="sub">Please try again.</p>',
+                  is_error=True),
             status_code=500,
         )
 
@@ -130,6 +216,8 @@ async def gdrive_auth_callback(request: Request):
         _log.warning("Could not notify user %s: %s", telegram_id, e)
 
     return HTMLResponse(
-        "<h2>✅ Google Drive connected!</h2>"
-        "<p>You can close this tab and return to Telegram.</p>"
+        _page(CHECK_SVG, "Connected",
+              "Your Google Drive is now linked to Aruvi.",
+              '<div class="badge">' + DRIVE_SVG + ' Google Drive · Connected</div>'
+              '<p class="sub">You can close this tab.</p>')
     )

@@ -14,7 +14,7 @@ from ..database import async_session
 from ..models import User
 from ..gdrive import exchange_code, consume_state, generate_auth_url
 from ..config import get_settings
-from ..auth import get_current_user_opt
+from ..auth import verify_token_payload
 from sqlalchemy import select
 
 _log = logging.getLogger(__name__)
@@ -22,13 +22,38 @@ router = APIRouter(prefix="/gdrive", tags=["GDrive"])
 settings = get_settings()
 
 
+async def _resolve_user(request: Request):
+    """Extract token from query, verify it, return User or None."""
+    token = request.query_params.get("token")
+    if not token:
+        return None
+    payload = verify_token_payload(token)
+    if not payload:
+        return None
+    try:
+        telegram_id = int(payload.get("sub"))
+    except (TypeError, ValueError):
+        return None
+    async with async_session() as db:
+        result = await db.execute(
+            select(User).where(User.telegram_id == telegram_id)
+        )
+        user = result.scalar_one_or_none()
+        if not user:
+            return None
+        token_version = payload.get("ver")
+        if token_version is not None and token_version < user.auth_version:
+            return None
+        return user
+
+
 @router.get("/auth")
 async def gdrive_auth(request: Request):
     """Redirect user to Google OAuth consent screen.
 
-    Requires a valid token. If already connected, returns status.
+    Requires ?token= query param. If already connected, returns status.
     """
-    user = await get_current_user_opt(request)
+    user = await _resolve_user(request)
     if not user:
         return HTMLResponse(
             "<h2>❌ Authentication required.</h2>"

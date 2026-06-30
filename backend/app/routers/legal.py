@@ -25,10 +25,14 @@ hr{border:none;border-top:1px solid #222;margin:40px 0}
 .foot{color:#555;font-size:0.8rem}
 </style>"""
 
-NAV_BAR = """\
+def _nav(active: str) -> str:
+    def link(href, label):
+        cls = ' class="active"' if href == active else ""
+        return f'<a href="{href}"{cls}>{label}</a>'
+    return f"""\
 <div class="nav">
-<a href="/privacy" class="active">Privacy Policy</a>
-<a href="/terms">Terms of Service</a>
+{link("/privacy", "Privacy Policy")}
+{link("/terms", "Terms of Service")}
 <a href="https://REDACTED_DOMAIN">Aruvi</a>
 </div>"""
 
@@ -48,9 +52,9 @@ PAGE_TPL = """\
 </html>"""
 
 
-def page(title, content):
+def page(title, content, active):
     return PAGE_TPL.format(
-        title=title, style=STYLE, nav=NAV_BAR, content=content, year="2026"
+        title=title, style=STYLE, nav=_nav(active), content=content, year="2026"
     )
 
 
@@ -115,19 +119,10 @@ TERMS_CONTENT = """\
 
 @router.get("/privacy", response_class=HTMLResponse)
 async def privacy():
-    return page("Privacy Policy", PRIVACY_CONTENT)
+    return page("Privacy Policy", PRIVACY_CONTENT, "/privacy")
 
 
 @router.get("/terms", response_class=HTMLResponse)
 async def terms():
-    return page("Terms of Service", TERMS_CONTENT)
+    return page("Terms of Service", TERMS_CONTENT, "/terms")
 
-
-@router.get("/privacy", response_class=HTMLResponse)
-async def privacy():
-    return PRIVACY
-
-
-@router.get("/terms", response_class=HTMLResponse)
-async def terms():
-    return TERMS

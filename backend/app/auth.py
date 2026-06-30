@@ -85,7 +85,7 @@ async def get_current_user_opt(
 ) -> Optional[User]:
     """Optional auth — returns None instead of raising on missing/invalid token."""
     token = None
-    if credentials:
+    if credentials and not isinstance(credentials, Depends):
         token = credentials.credentials
     if not token and request and "token" in request.query_params:
         token = request.query_params["token"]

@@ -13,3 +13,4 @@ session/
 *.db-wal
 opencode
 cloudflared
+gdrive_env.txt

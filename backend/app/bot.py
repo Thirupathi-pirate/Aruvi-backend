@@ -5,6 +5,7 @@ Handles commands, file uploads, and inline callbacks.
 
 import asyncio
 import functools
+import json
 import secrets
 import string
 import traceback
@@ -1352,7 +1353,6 @@ async def handle_callback(client, callback: CallbackQuery):
 
         # Run upload in background so the bot stays responsive
         async def _do_gdrive_upload():
-            import json
             try:
                 token_dict = json.loads(token_json)
                 msg = await tg_client.get_messages(

@@ -1250,12 +1250,7 @@ async def handle_callback(client, callback: CallbackQuery):
     elif data.startswith("downloadfile:"):
         file_id = int(data.split(":")[1])
 
-        await callback.answer("⏳ Sending file...")
-        await callback.message.edit(
-            "📥 **Downloading...**\n\n"
-            "Please wait while I send you the file.\n"
-            "__(Large files may take a moment)__"
-        )
+        await callback.answer("🔗 Generating link...")
 
         async with async_session() as db:
             user_result = await db.execute(
@@ -1274,37 +1269,26 @@ async def handle_callback(client, callback: CallbackQuery):
                 await callback.message.edit("❌ File not found.")
                 return
 
-            channel_msg_id = file.channel_message_id
             file_name = file.file_name
+            file_size = file.file_size
+            file_type = file.file_type
 
-        try:
-            await client.copy_message(
-                chat_id=callback.message.chat.id,
-                from_chat_id=settings.telegram_storage_channel_id,
-                message_id=channel_msg_id,
-            )
-            await callback.message.edit(
-                f"✅ **Download complete!**\n\n"
-                f"📄 `{file_name}`\n\n"
-                "The file has been sent above. ⬆️"
-            )
-        except Exception as e:
-            _log.exception("Download failed for file %s", file_id)
-            token = create_access_token(callback.from_user.id)
-            from urllib.parse import quote
-            download_url = (
-                f"{settings.web_base_url}/api/stream/{file_id}"
-                f"?download=1&token={quote(token, safe='')}"
-            )
-            await callback.message.edit(
-                f"⚠️ **Download via Telegram failed.**\n\n"
-                f"File: `{file_name}`\n"
-                f"Reason: {str(e)}\n\n"
-                f"🔗 **Web Download Link:**\n"
-                f"{download_url}\n\n"
-                "Click the link above to download in your browser.\n"
-                "__(Link expires in 7 days)__"
-            )
+        token = create_access_token(callback.from_user.id)
+        from urllib.parse import quote
+        download_url = (
+            f"{settings.web_base_url}/api/stream/{file_id}"
+            f"?download=1&token={quote(token, safe='')}"
+        )
+
+        emoji = {"video": "🎬", "audio": "🎵", "document": "📄", "image": "🖼"}.get(file_type, "📎")
+        await callback.message.edit(
+            f"{emoji} **{file_name}**\n"
+            f"📦 {format_size(file_size)}\n\n"
+            f"🔗 **Download Link:**\n"
+            f"{download_url}\n\n"
+            "Tap the link above or copy it to your browser to download.\n"
+            "__(Link expires in 7 days)__"
+        )
 
     elif data.startswith("savetodrive:"):
         file_id = int(data.split(":")[1])

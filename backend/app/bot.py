@@ -430,6 +430,35 @@ async def web_command(client, message: Message):
     )
 
 
+@tg_client.on_message(filters.command("drive") & filters.private)
+@_log_exceptions
+async def drive_command(client, message: Message):
+    """Connect or check Google Drive status."""
+    user = await get_or_create_user(
+        message.from_user.id,
+        message.from_user.username,
+        message.from_user.first_name,
+        message.from_user.last_name,
+    )
+
+    if user.gdrive_token:
+        await message.reply(
+            "☁️ **Google Drive Connected**\n\n"
+            "Your Google Drive is already linked.\n"
+            "Use the ☁️ **Save to Drive** button on any file to upload it.",
+        )
+        return
+
+    auth_url = gdrive_mod.generate_auth_url(user.telegram_id)
+    await message.reply(
+        "☁️ **Google Drive Setup**\n\n"
+        "Connect your Google account to save files directly to your Drive.\n\n"
+        f"[Click here to connect]({auth_url})\n\n"
+        "After authorizing, come back and use the ☁️ **Save to Drive** button.",
+        disable_web_page_preview=True,
+    )
+
+
 @tg_client.on_message(filters.command("login") & filters.private)
 @_log_exceptions
 async def login_command(client, message: Message):

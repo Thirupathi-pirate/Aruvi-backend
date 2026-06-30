@@ -235,7 +235,7 @@ async def help_command(client, message: Message):
         "**File Management:**\n"
         "• /myfiles - List your recent files with IDs\n"
         "• /file `<id>` - Manage a specific file\n"
-        "  ↳ Rename, Move, Delete, Open Web\n\n"
+        "  ↳ Rename, Move, Download, Delete, Share\n\n"
         
         "**Folder Management:**\n"
         "• /folders - Browse all folders\n"
@@ -618,7 +618,10 @@ async def handle_file(client, message: Message):
                     InlineKeyboardButton("📂 Move", callback_data=f"move:{file.id}"),
                 ],
                 [
+                    InlineKeyboardButton("📥 Download", callback_data=f"downloadfile:{file.id}"),
                     InlineKeyboardButton("🗑 Delete", callback_data=f"delfile:{file.id}"),
+                ],
+                [
                     InlineKeyboardButton("🔗 Share", callback_data=f"sharefile:{file.id}"),
                 ],
             ])
@@ -1087,6 +1090,219 @@ async def handle_callback(client, callback: CallbackQuery):
         )
         await callback.answer("Public link revoked!", show_alert=True)
     
+    elif data.startswith("move:"):
+        file_id = int(data.split(":")[1])
+
+        async with async_session() as db:
+            user_result = await db.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                await callback.answer("Please use /start first", show_alert=True)
+                return
+
+            result = await db.execute(
+                select(File).where(File.id == file_id, File.user_id == user.id)
+            )
+            file = result.scalar_one_or_none()
+            if not file:
+                await callback.answer("File not found", show_alert=True)
+                return
+
+            file_name = file.file_name
+            current_folder_id = file.folder_id
+
+            folders_result = await db.execute(
+                select(Folder)
+                .where(Folder.user_id == user.id, Folder.parent_id.is_(None))
+                .order_by(Folder.name)
+            )
+            folders = folders_result.scalars().all()
+
+        text = (
+            f"📂 **Move File**\n\n"
+            f"`{file_name}`\n\n"
+            "Select destination folder:"
+        )
+        buttons = []
+
+        is_root = current_folder_id is None
+        buttons.append([
+            InlineKeyboardButton(
+                f"{'✅ ' if is_root else ''}📁 / (Root)",
+                callback_data=f"movehere:{file_id}:0"
+            )
+        ])
+
+        for f in folders:
+            is_current = f.id == current_folder_id
+            buttons.append([
+                InlineKeyboardButton(
+                    f"{'✅ ' if is_current else ''}📂 {f.name}",
+                    callback_data=f"movehere:{file_id}:{f.id}"
+                )
+            ])
+
+        buttons.append([InlineKeyboardButton("➕ New Folder", callback_data=f"createmovefolder:{file_id}")])
+        buttons.append([InlineKeyboardButton("❌ Cancel", callback_data="canceldel")])
+
+        await callback.message.edit(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await callback.answer()
+
+    elif data.startswith("movehere:"):
+        parts = data.split(":")
+        file_id = int(parts[1])
+        folder_id = int(parts[2]) if parts[2] != "0" else None
+
+        async with async_session() as db:
+            result = await db.execute(select(File).where(File.id == file_id))
+            file = result.scalar_one_or_none()
+            if not file:
+                await callback.answer("File not found", show_alert=True)
+                return
+
+            file.folder_id = folder_id
+            await db.commit()
+            file_name = file.file_name
+
+            folder_label = "/ (Root)"
+            if folder_id is not None:
+                folder_result = await db.execute(select(Folder).where(Folder.id == folder_id))
+                folder = folder_result.scalar_one_or_none()
+                folder_label = f"📁 {folder.name}" if folder else f"ID {folder_id}"
+
+        await callback.message.edit(
+            f"✅ **File moved!**\n\n"
+            f"`{file_name}`\n"
+            f"→ {folder_label}"
+        )
+        await callback.answer("File moved successfully!", show_alert=True)
+
+    elif data.startswith("createmovefolder:"):
+        file_id = int(data.split(":")[1])
+
+        await callback.message.reply(
+            "📁 **Create & Move**\n\n"
+            "Send me the folder name to create and move the file into:\n"
+            "__(or send /cancel to abort)__"
+        )
+        await callback.answer()
+
+        try:
+            reply = await client.wait_for_message(
+                chat_id=callback.message.chat.id,
+                timeout=60
+            )
+
+            if reply.text and reply.text.startswith("/cancel"):
+                await reply.reply("❌ Cancelled.")
+                return
+
+            folder_name = reply.text.strip() if reply.text else None
+            if not folder_name:
+                await reply.reply("❌ Invalid folder name.")
+                return
+
+            async with async_session() as db:
+                user_result = await db.execute(
+                    select(User).where(User.telegram_id == reply.from_user.id)
+                )
+                user = user_result.scalar_one_or_none()
+                if not user:
+                    await reply.reply("Please use /start first.")
+                    return
+
+                existing = await db.execute(
+                    select(Folder).where(
+                        Folder.user_id == user.id,
+                        Folder.name == folder_name,
+                        Folder.parent_id.is_(None)
+                    )
+                )
+                if existing.scalar_one_or_none():
+                    await reply.reply(f"❌ Folder **{folder_name}** already exists.")
+                    return
+
+                folder = Folder(user_id=user.id, name=folder_name)
+                db.add(folder)
+                await db.commit()
+                await db.refresh(folder)
+
+                result = await db.execute(
+                    select(File).where(File.id == file_id, File.user_id == user.id)
+                )
+                file = result.scalar_one_or_none()
+                if file:
+                    file.folder_id = folder.id
+                    await db.commit()
+
+            await reply.reply(f"✅ Folder **{folder_name}** created and file moved!")
+
+        except asyncio.TimeoutError:
+            await callback.message.reply("⏱ Timed out. Please try again.")
+        except Exception as e:
+            await callback.message.reply(f"❌ Error: {str(e)}")
+
+    elif data.startswith("downloadfile:"):
+        file_id = int(data.split(":")[1])
+
+        await callback.answer("⏳ Sending file...")
+        await callback.message.edit(
+            "📥 **Downloading...**\n\n"
+            "Please wait while I send you the file.\n"
+            "__(Large files may take a moment)__"
+        )
+
+        async with async_session() as db:
+            user_result = await db.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                await callback.message.edit("❌ Please use /start first.")
+                return
+
+            result = await db.execute(
+                select(File).where(File.id == file_id, File.user_id == user.id)
+            )
+            file = result.scalar_one_or_none()
+            if not file:
+                await callback.message.edit("❌ File not found.")
+                return
+
+            channel_msg_id = file.channel_message_id
+            file_name = file.file_name
+
+        try:
+            await client.copy_message(
+                chat_id=callback.message.chat.id,
+                from_chat_id=settings.telegram_storage_channel_id,
+                message_id=channel_msg_id,
+            )
+            await callback.message.edit(
+                f"✅ **Download complete!**\n\n"
+                f"📄 `{file_name}`\n\n"
+                "The file has been sent above. ⬆️"
+            )
+        except Exception as e:
+            _log.exception("Download failed for file %s", file_id)
+            token = create_access_token(callback.from_user.id)
+            from urllib.parse import quote
+            download_url = (
+                f"{settings.web_base_url}/api/stream/{file_id}"
+                f"?download=1&token={quote(token, safe='')}"
+            )
+            await callback.message.edit(
+                f"⚠️ **Download via Telegram failed.**\n\n"
+                f"File: `{file_name}`\n"
+                f"Reason: {str(e)}\n\n"
+                f"🔗 **Web Download Link:**\n"
+                f"{download_url}\n\n"
+                "Click the link above to download in your browser.\n"
+                "__(Link expires in 7 days)__"
+            )
+
     elif data == "canceldel":
         await callback.message.edit("❌ Deletion cancelled.")
         await callback.answer()
@@ -1154,7 +1370,10 @@ async def file_command(client, message: Message):
                 InlineKeyboardButton("📂 Move", callback_data=f"move:{file.id}"),
             ],
             [
+                InlineKeyboardButton("📥 Download", callback_data=f"downloadfile:{file.id}"),
                 InlineKeyboardButton("🗑 Delete", callback_data=f"delfile:{file.id}"),
+            ],
+            [
                 share_btn,
             ],
         ])

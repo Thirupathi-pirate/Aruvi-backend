@@ -4,10 +4,12 @@ Never buffers the full file; streams Telegram chunks directly to Drive.
 """
 
 import asyncio
+import hashlib
 import json
 import logging
 import secrets
 import time
+from base64 import urlsafe_b64encode
 from datetime import datetime
 
 import httpx
@@ -26,16 +28,22 @@ SCOPES = ["https://www.googleapis.com/auth/drive.file"]
 CHUNK_SIZE = 1024 * 1024  # 1MB — matches pyrotgfork's hardcoded chunk size
 
 # In-memory nonce store for OAuth CSRF protection
-# {nonce: (telegram_id, timestamp)}
-_nonce_store: dict[str, tuple[int, float]] = {}
+# {nonce: (telegram_id, timestamp, code_verifier)}
+_nonce_store: dict[str, tuple[int, float, str]] = {}
 _NONCE_TTL = 600  # 10 minutes
 
 
 def _prune_nonces():
     now = time.monotonic()
-    expired = [k for k, (_, ts) in _nonce_store.items() if now - ts > _NONCE_TTL]
+    expired = [k for k, (_, ts, _) in _nonce_store.items() if now - ts > _NONCE_TTL]
     for k in expired:
         _nonce_store.pop(k, None)
+
+
+def _pkce_challenge(verifier: str) -> str:
+    """Compute S256 code_challenge from a code_verifier."""
+    digest = hashlib.sha256(verifier.encode("ascii")).digest()
+    return urlsafe_b64encode(digest).rstrip(b"=").decode("ascii")
 
 
 def _flow() -> Flow:
@@ -58,19 +66,23 @@ def _flow() -> Flow:
 def generate_auth_url(telegram_id: int) -> str:
     """Generate Google OAuth URL for the given Telegram user.
 
-    Embeds a nonce in the state param to prevent CSRF on callback.
-    The nonce is stored in-memory and verified when the user returns.
+    Uses PKCE (S256) and embeds a nonce in the state param to prevent CSRF.
+    The code_verifier is stored in-memory alongside the nonce.
     """
     _prune_nonces()
     flow = _flow()
     nonce = secrets.token_hex(16)
-    _nonce_store[nonce] = (telegram_id, time.monotonic())
+    code_verifier = secrets.token_urlsafe(64)
+    code_challenge = _pkce_challenge(code_verifier)
+    _nonce_store[nonce] = (telegram_id, time.monotonic(), code_verifier)
     state = f"{telegram_id}:{nonce}"
     auth_url, _ = flow.authorization_url(
         access_type="offline",
         prompt="consent",
         state=state,
         include_granted_scopes="true",
+        code_challenge=code_challenge,
+        code_challenge_method="S256",
     )
     return auth_url
 
@@ -89,21 +101,35 @@ def verify_nonce(state: str) -> int:
     stored = _nonce_store.pop(nonce, None)
     if stored is None:
         raise ValueError("Invalid or expired nonce — please re-authorize")
-    stored_id, _ = stored
+    stored_id, _ = stored[:2]
     if stored_id != telegram_id:
         raise ValueError("telegram_id mismatch in state")
     return telegram_id
 
 
-def exchange_code(code: str) -> dict:
+def exchange_code(code: str, code_verifier: str) -> dict:
     """Exchange an OAuth authorization code for a token dict.
 
+    Requires the code_verifier used during the authorization request (PKCE).
     The dict is JSON-serialisable and suitable for storing in the DB.
     """
     flow = _flow()
-    flow.fetch_token(code=code)
+    flow.fetch_token(code=code, code_verifier=code_verifier)
     creds = flow.credentials
     return _creds_to_dict(creds)
+
+
+def pop_code_verifier(state: str) -> str:
+    """Retrieve and remove the code_verifier for a given state."""
+    _prune_nonces()
+    try:
+        _, nonce = state.split(":", 1)
+    except (ValueError, IndexError):
+        raise ValueError("Invalid state format")
+    stored = _nonce_store.pop(nonce, None)
+    if stored is None:
+        raise ValueError("Invalid or expired nonce — please re-authorize")
+    return stored[2]
 
 
 def _creds_to_dict(creds: UserCredentials) -> dict:

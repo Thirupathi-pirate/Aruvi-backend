@@ -78,6 +78,36 @@ def verify_token(token: str, token_type: str = "access") -> Optional[int]:
 
 
 
+async def get_current_user_opt(
+    request: Request = None,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db)
+) -> Optional[User]:
+    """Optional auth — returns None instead of raising on missing/invalid token."""
+    token = None
+    if credentials:
+        token = credentials.credentials
+    if not token and request and "token" in request.query_params:
+        token = request.query_params["token"]
+    if not token:
+        return None
+    try:
+        payload = verify_token_payload(token)
+        telegram_id = int(payload.get("sub")) if payload and payload.get("sub") else None
+        token_version = payload.get("ver") if payload else None
+    except Exception:
+        return None
+    if not telegram_id:
+        return None
+    result = await db.execute(select(User).where(User.telegram_id == telegram_id))
+    user = result.scalar_one_or_none()
+    if not user:
+        return None
+    if token_version is not None and token_version < user.auth_version:
+        return None
+    return user
+
+
 async def get_current_user(
     request: Request = None,
     credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),

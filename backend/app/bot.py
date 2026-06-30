@@ -1404,6 +1404,20 @@ async def handle_callback(client, callback: CallbackQuery):
                 except Exception:
                     pass
 
+                async def _progress(uploaded, total):
+                    pct = uploaded * 100 // total if total else 0
+                    bars = "▓" * (pct // 10) + "░" * (10 - pct // 10)
+                    try:
+                        await callback.message.edit(
+                            f"☁️ **Uploading to Google Drive...**\n\n"
+                            f"📄 `{file_name}`\n"
+                            f"📦 {format_size(file_size)}\n\n"
+                            f"`[{bars}] {pct}%`\n"
+                            f"📤 {format_size(uploaded)} / {format_size(total)}"
+                        )
+                    except Exception:
+                        pass
+
                 link = await gdrive_mod.upload_streaming(
                     token_dict,
                     msg,
@@ -1411,6 +1425,7 @@ async def handle_callback(client, callback: CallbackQuery):
                     mime_type,
                     file_size,
                     folder_id,
+                    progress_callback=_progress,
                 )
 
                 # Persist refreshed token back to DB

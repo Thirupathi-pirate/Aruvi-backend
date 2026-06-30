@@ -202,6 +202,7 @@ async def upload_streaming(
     mime_type: str,
     file_size: int,
     folder_id: str,
+    progress_callback=None,
 ) -> str:
     """Stream a Telegram Message directly to Google Drive using the
     resumable upload protocol.  No temp file is written.
@@ -267,6 +268,9 @@ async def upload_streaming(
                 )
 
             uploaded += len(chunk_bytes)
+
+            if progress_callback:
+                await progress_callback(uploaded, total)
 
     # 3. Retrieve the uploaded file's webViewLink
     if resp is None:

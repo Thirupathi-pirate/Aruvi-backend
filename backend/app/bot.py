@@ -1333,7 +1333,7 @@ async def handle_callback(client, callback: CallbackQuery):
             token_json = user.gdrive_token
 
         if not token_json:
-            auth_url, _ = gdrive_mod.generate_auth_url(callback.from_user.id)
+            auth_url = gdrive_mod.generate_auth_url(callback.from_user.id)
             await callback.message.edit(
                 "☁️ **Google Drive Not Connected**\n\n"
                 "You need to connect your Google account first.\n\n"
@@ -1359,21 +1359,38 @@ async def handle_callback(client, callback: CallbackQuery):
                     settings.telegram_storage_channel_id,
                     channel_msg_id,
                 )
-                if not msg or not getattr(msg, "video", None) and not getattr(msg, "document", None) and not getattr(msg, "audio", None):
-                    await callback.message.edit(f"❌ Could not fetch file from Telegram storage.")
+                if not msg:
+                    try:
+                        await callback.message.edit("❌ File no longer available in Telegram storage.")
+                    except Exception:
+                        pass
+                    return
+
+                has_media = any((
+                    getattr(msg, "video", None),
+                    getattr(msg, "document", None),
+                    getattr(msg, "audio", None),
+                ))
+                if not has_media:
+                    try:
+                        await callback.message.edit("❌ Message has no streamable media.")
+                    except Exception:
+                        pass
                     return
 
                 service = gdrive_mod.build_service(token_dict)
                 folder_id = await gdrive_mod.ensure_aruvi_folder(service)
 
-                await callback.message.edit(
-                    f"☁️ **Uploading to Google Drive...**\n\n"
-                    f"📄 `{file_name}`\n"
-                    f"📦 {format_size(file_size)}\n\n"
-                    "📤 Streaming to Drive..."
-                )
+                try:
+                    await callback.message.edit(
+                        f"☁️ **Uploading to Google Drive...**\n\n"
+                        f"📄 `{file_name}`\n"
+                        f"📦 {format_size(file_size)}\n\n"
+                        "📤 Streaming to Drive..."
+                    )
+                except Exception:
+                    pass
 
-                # Refresh token dict after build_service may have updated it
                 link = await gdrive_mod.upload_streaming(
                     token_dict,
                     msg,
@@ -1393,21 +1410,27 @@ async def handle_callback(client, callback: CallbackQuery):
                         u.gdrive_token = json.dumps(token_dict)
                         await db.commit()
 
-                await callback.message.edit(
-                    f"✅ **Uploaded to Google Drive!**\n\n"
-                    f"📄 `{file_name}`\n"
-                    f"📁 Folder: **Aruvi**\n\n"
-                    f"🔗 [Open in Drive]({link})",
-                    disable_web_page_preview=True,
-                )
+                try:
+                    await callback.message.edit(
+                        f"✅ **Uploaded to Google Drive!**\n\n"
+                        f"📄 `{file_name}`\n"
+                        f"📁 Folder: **Aruvi**\n\n"
+                        f"🔗 [Open in Drive]({link})",
+                        disable_web_page_preview=True,
+                    )
+                except Exception:
+                    pass
             except Exception as e:
                 _log.exception("GDrive upload failed for file %s", file_id)
-                await callback.message.edit(
-                    f"❌ **Upload failed.**\n\n"
-                    f"File: `{file_name}`\n"
-                    f"Error: {str(e)}\n\n"
-                    "Please try again later."
-                )
+                try:
+                    await callback.message.edit(
+                        f"❌ **Upload failed.**\n\n"
+                        f"File: `{file_name}`\n"
+                        f"Error: {str(e)}\n\n"
+                        "Please try again later."
+                    )
+                except Exception:
+                    pass
 
         asyncio.create_task(_do_gdrive_upload())
 

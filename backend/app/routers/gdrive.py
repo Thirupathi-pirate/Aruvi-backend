@@ -7,12 +7,12 @@ We exchange the code for tokens, store on the User record, notify via bot.
 import json
 import logging
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request
 from fastapi.responses import HTMLResponse
 
 from ..database import async_session
 from ..models import User
-from ..gdrive import exchange_code
+from ..gdrive import exchange_code, verify_nonce
 from ..config import get_settings
 from sqlalchemy import select
 
@@ -34,12 +34,18 @@ async def gdrive_auth_callback(request: Request):
         )
 
     if not code or not state:
-        raise HTTPException(status_code=400, detail="Missing code or state")
+        return HTMLResponse(
+            "<h2>❌ Missing code or state parameter.</h2>",
+            status_code=400,
+        )
 
     try:
-        telegram_id = int(state.split(":")[0])
-    except (ValueError, IndexError):
-        raise HTTPException(status_code=400, detail="Invalid state")
+        telegram_id = verify_nonce(state)
+    except ValueError as e:
+        return HTMLResponse(
+            f"<h2>❌ {e}</h2>",
+            status_code=400,
+        )
 
     try:
         token_dict = exchange_code(code)

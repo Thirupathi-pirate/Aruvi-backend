@@ -3,10 +3,12 @@ Google Drive integration — OAuth + stream-through upload.
 Never buffers the full file; streams Telegram chunks directly to Drive.
 """
 
+import asyncio
 import json
 import logging
 import secrets
-from datetime import datetime, timezone
+import time
+from datetime import datetime
 
 import httpx
 from google.auth.transport.requests import Request as GoogleAuthRequest
@@ -21,7 +23,19 @@ _log = logging.getLogger(__name__)
 settings = get_settings()
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
-CHUNK_SIZE = 1024 * 1024  # 1MB
+CHUNK_SIZE = 1024 * 1024  # 1MB — matches pyrotgfork's hardcoded chunk size
+
+# In-memory nonce store for OAuth CSRF protection
+# {nonce: (telegram_id, timestamp)}
+_nonce_store: dict[str, tuple[int, float]] = {}
+_NONCE_TTL = 600  # 10 minutes
+
+
+def _prune_nonces():
+    now = time.monotonic()
+    expired = [k for k, (_, ts) in _nonce_store.items() if now - ts > _NONCE_TTL]
+    for k in expired:
+        _nonce_store.pop(k, None)
 
 
 def _flow() -> Flow:
@@ -39,14 +53,16 @@ def _flow() -> Flow:
     )
 
 
-def generate_auth_url(telegram_id: int) -> tuple[str, str]:
-    """Generate Google OAuth URL + nonce for the given Telegram user.
+def generate_auth_url(telegram_id: int) -> str:
+    """Generate Google OAuth URL for the given Telegram user.
 
-    Returns (url, nonce).  The nonce is embedded in the state param so the
-    callback can look up which telegram_id to attach the token to.
+    Embeds a nonce in the state param to prevent CSRF on callback.
+    The nonce is stored in-memory and verified when the user returns.
     """
+    _prune_nonces()
     flow = _flow()
-    nonce = secrets.token_hex(8)
+    nonce = secrets.token_hex(16)
+    _nonce_store[nonce] = (telegram_id, time.monotonic())
     state = f"{telegram_id}:{nonce}"
     auth_url, _ = flow.authorization_url(
         access_type="offline",
@@ -54,7 +70,27 @@ def generate_auth_url(telegram_id: int) -> tuple[str, str]:
         state=state,
         include_granted_scopes="true",
     )
-    return auth_url, nonce
+    return auth_url
+
+
+def verify_nonce(state: str) -> int:
+    """Verify the OAuth state and return the telegram_id.
+    Raises ValueError if the nonce is invalid or expired.
+    """
+    _prune_nonces()
+    try:
+        telegram_id_str, nonce = state.split(":", 1)
+        telegram_id = int(telegram_id_str)
+    except (ValueError, IndexError):
+        raise ValueError("Invalid state format")
+
+    stored = _nonce_store.pop(nonce, None)
+    if stored is None:
+        raise ValueError("Invalid or expired nonce — please re-authorize")
+    stored_id, _ = stored
+    if stored_id != telegram_id:
+        raise ValueError("telegram_id mismatch in state")
+    return telegram_id
 
 
 def exchange_code(code: str) -> dict:
@@ -96,18 +132,6 @@ def _creds_from_dict(d: dict) -> UserCredentials:
         scopes=d.get("scopes", SCOPES),
         expiry=expiry,
     )
-
-
-def refresh_token_dict(token_dict: dict) -> dict:
-    """Refresh the access token if expired.  Returns the (possibly updated)
-    token dict so the caller can persist it back to the DB."""
-    creds = _creds_from_dict(token_dict)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleAuthRequest())
-        token_dict["token"] = creds.token
-        if creds.expiry:
-            token_dict["expiry"] = creds.expiry.isoformat()
-    return token_dict
 
 
 def get_access_token(token_dict: dict) -> str:
@@ -195,31 +219,44 @@ async def upload_streaming(
         upload_url = session_resp.headers["Location"]
 
         uploaded = 0
-        async for chunk in tg_client.stream_media(msg, chunk_size=CHUNK_SIZE):
+        resp = None
+        async for chunk in tg_client.stream_media(msg):
             chunk_bytes = chunk if isinstance(chunk, bytes) else bytes(chunk)
             start = uploaded
             end = uploaded + len(chunk_bytes) - 1
             total = file_size
 
-            resp = await client.put(
-                upload_url,
-                headers={
-                    "Content-Range": f"bytes {start}-{end}/{total}",
-                    "Content-Length": str(len(chunk_bytes)),
-                },
-                content=chunk_bytes,
-            )
-            if resp.status_code not in (200, 201, 308):
-                _log.error(
-                    "Drive upload chunk failed: %s %s",
-                    resp.status_code,
-                    resp.text,
+            # Retry up to 3 times for transient failures
+            last_error = None
+            for attempt in range(3):
+                try:
+                    resp = await client.put(
+                        upload_url,
+                        headers={
+                            "Content-Range": f"bytes {start}-{end}/{total}",
+                            "Content-Length": str(len(chunk_bytes)),
+                        },
+                        content=chunk_bytes,
+                    )
+                    if resp.status_code in (200, 201, 308):
+                        break
+                    last_error = f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    if resp.status_code < 500 and resp.status_code != 429:
+                        break
+                except (httpx.TimeoutException, httpx.NetworkError) as e:
+                    last_error = str(e)
+                await asyncio.sleep(1 * (attempt + 1))
+            else:
+                raise RuntimeError(
+                    f"Upload chunk failed after 3 retries: {last_error}"
                 )
-                resp.raise_for_status()
 
             uploaded += len(chunk_bytes)
 
     # 3. Retrieve the uploaded file's webViewLink
+    if resp is None:
+        raise RuntimeError("No chunks were uploaded (empty file?)")
+
     file_resource = resp.json()
     file_id = file_resource.get("id")
     if not file_id:

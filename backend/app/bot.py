@@ -18,6 +18,7 @@ from .database import async_session
 from .models import User, File, Folder, LoginCode
 from .config import get_settings
 from .auth import create_access_token
+from . import gdrive as gdrive_mod
 
 settings = get_settings()
 
@@ -622,6 +623,7 @@ async def handle_file(client, message: Message):
                     InlineKeyboardButton("🗑 Delete", callback_data=f"delfile:{file.id}"),
                 ],
                 [
+                    InlineKeyboardButton("☁️ Save to Drive", callback_data=f"savetodrive:{file.id}"),
                     InlineKeyboardButton("🔗 Share", callback_data=f"sharefile:{file.id}"),
                 ],
             ])
@@ -1303,6 +1305,112 @@ async def handle_callback(client, callback: CallbackQuery):
                 "__(Link expires in 7 days)__"
             )
 
+    elif data.startswith("savetodrive:"):
+        file_id = int(data.split(":")[1])
+        await callback.answer("☁️ Processing...")
+
+        async with async_session() as db:
+            user_result = await db.execute(
+                select(User).where(User.telegram_id == callback.from_user.id)
+            )
+            user = user_result.scalar_one_or_none()
+            if not user:
+                await callback.message.edit("❌ Please use /start first.")
+                return
+
+            result = await db.execute(
+                select(File).where(File.id == file_id, File.user_id == user.id)
+            )
+            file = result.scalar_one_or_none()
+            if not file:
+                await callback.message.edit("❌ File not found.")
+                return
+
+            channel_msg_id = file.channel_message_id
+            file_name = file.file_name
+            file_size = file.file_size
+            mime_type = file.mime_type or "application/octet-stream"
+            token_json = user.gdrive_token
+
+        if not token_json:
+            auth_url, _ = gdrive_mod.generate_auth_url(callback.from_user.id)
+            await callback.message.edit(
+                "☁️ **Google Drive Not Connected**\n\n"
+                "You need to connect your Google account first.\n\n"
+                f"[Click here to connect]({auth_url})\n\n"
+                "After authorizing, return here and tap **Save to Drive** again.",
+                disable_web_page_preview=True,
+            )
+            return
+
+        await callback.message.edit(
+            f"☁️ **Uploading to Google Drive...**\n\n"
+            f"📄 `{file_name}`\n"
+            f"📦 {format_size(file_size)}\n\n"
+            "⏳ Connecting to Google Drive..."
+        )
+
+        # Run upload in background so the bot stays responsive
+        async def _do_gdrive_upload():
+            import json
+            try:
+                token_dict = json.loads(token_json)
+                msg = await tg_client.get_messages(
+                    settings.telegram_storage_channel_id,
+                    channel_msg_id,
+                )
+                if not msg or not getattr(msg, "video", None) and not getattr(msg, "document", None) and not getattr(msg, "audio", None):
+                    await callback.message.edit(f"❌ Could not fetch file from Telegram storage.")
+                    return
+
+                service = gdrive_mod.build_service(token_dict)
+                folder_id = await gdrive_mod.ensure_aruvi_folder(service)
+
+                await callback.message.edit(
+                    f"☁️ **Uploading to Google Drive...**\n\n"
+                    f"📄 `{file_name}`\n"
+                    f"📦 {format_size(file_size)}\n\n"
+                    "📤 Streaming to Drive..."
+                )
+
+                # Refresh token dict after build_service may have updated it
+                link = await gdrive_mod.upload_streaming(
+                    token_dict,
+                    msg,
+                    file_name,
+                    mime_type,
+                    file_size,
+                    folder_id,
+                )
+
+                # Persist refreshed token back to DB
+                async with async_session() as db:
+                    u_result = await db.execute(
+                        select(User).where(User.telegram_id == callback.from_user.id)
+                    )
+                    u = u_result.scalar_one_or_none()
+                    if u:
+                        u.gdrive_token = json.dumps(token_dict)
+                        await db.commit()
+
+                await callback.message.edit(
+                    f"✅ **Uploaded to Google Drive!**\n\n"
+                    f"📄 `{file_name}`\n"
+                    f"📁 Folder: **Aruvi**\n\n"
+                    f"🔗 [Open in Drive]({link})",
+                    disable_web_page_preview=True,
+                )
+            except Exception as e:
+                _log.exception("GDrive upload failed for file %s", file_id)
+                await callback.message.edit(
+                    f"❌ **Upload failed.**\n\n"
+                    f"File: `{file_name}`\n"
+                    f"Error: {str(e)}\n\n"
+                    "Please try again later."
+                )
+
+        asyncio.create_task(_do_gdrive_upload())
+
     elif data == "canceldel":
         await callback.message.edit("❌ Deletion cancelled.")
         await callback.answer()
@@ -1374,6 +1482,7 @@ async def file_command(client, message: Message):
                 InlineKeyboardButton("🗑 Delete", callback_data=f"delfile:{file.id}"),
             ],
             [
+                InlineKeyboardButton("☁️ Save to Drive", callback_data=f"savetodrive:{file.id}"),
                 share_btn,
             ],
         ])

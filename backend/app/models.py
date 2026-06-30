@@ -23,6 +23,7 @@ class User(Base):
     last_name: Mapped[Optional[str]] = mapped_column(String(255))
     is_admin: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     auth_version: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
+    gdrive_token: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, default=_utcnow)
     last_active: Mapped[datetime] = mapped_column(DateTime, default=_utcnow, onupdate=_utcnow)
     

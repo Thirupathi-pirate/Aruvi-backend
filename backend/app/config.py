@@ -86,6 +86,11 @@ class Settings(BaseSettings):
     # Proxy (Cloudflare WARP SOCKS5)
     telegram_proxy_enabled: bool = False
 
+    # Google Drive
+    gdrive_client_id: str = ""
+    gdrive_client_secret: str = ""
+    gdrive_redirect_uri: str = "https://REDACTED_DOMAIN/api/gdrive/auth/callback"
+
     # Web
     web_base_url: str = "https://REDACTED_DOMAIN"
 

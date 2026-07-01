@@ -45,7 +45,12 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
         os.makedirs(os.path.dirname(p), exist_ok=True)
         fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
         try:
-            os.write(fd, data)
+            offset = 0
+            while offset < len(data):
+                written = os.write(fd, data[offset:])
+                if written == 0:
+                    raise OSError("Short write: wrote 0 bytes")
+                offset += written
             os.posix_fadvise(fd, 0, len(data), os.POSIX_FADV_DONTNEED)
         finally:
             os.close(fd)

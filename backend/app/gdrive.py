@@ -8,6 +8,7 @@ import asyncio
 import hashlib
 import json
 import logging
+import os
 import secrets
 import time
 from base64 import urlsafe_b64encode
@@ -21,7 +22,8 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from .config import get_settings
-from .streaming import parallel_stream_generator
+from .streaming import _byte_accurate_file_stream, get_client_semaphore
+from .telegram import clients
 
 _log = logging.getLogger(__name__)
 settings = get_settings()
@@ -235,22 +237,66 @@ async def upload_streaming(
         }
     )
 
-    # ── Phase 1: Download full file to NVMe temp (parallel streaming) ──
+    # ── Phase 1: Download full file to NVMe temp (pipelined byte-accurate) ──
     GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     tmp = GDRIVE_UPLOAD_DIR / f"{msg.id}_{int(time.time())}.tmp"
 
     try:
-        # ── Phase 1: Download full file to NVMe temp (parallel streaming) ──
-        downloaded = 0
-        last_report = 0
+        # Pre-allocate temp file
         with open(tmp, "wb") as f:
-            async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10, cache=False):
-                f.write(chunk)
-                downloaded += len(chunk)
-                now = time.monotonic()
-                if progress_callback and (now - last_report >= 1 or downloaded >= total):
-                    await progress_callback(downloaded, total, "Downloading from Telegram")
-                    last_report = now
+            f.truncate(total)
+
+        downloaded = 0
+        last_ts = 0
+        dlerr = None
+        lock = asyncio.Lock()
+        fd = os.open(tmp, os.O_RDWR)
+
+        # Split file into 1MB slots — each slot is one _byte_accurate_file_stream call
+        SLOT_SIZE = 1024 * 1024
+        slot_starts = list(range(0, total, SLOT_SIZE))
+
+        # Use helper bots (skip bot 0)
+        helper_clients = [c for c in clients if getattr(c, "pool_index", 0) != 0]
+        if not helper_clients:
+            raise RuntimeError("No helper bots available")
+
+        async def _download_slot(slot_start: int, client_idx: int):
+            nonlocal downloaded, last_ts, dlerr
+            if dlerr:
+                return
+            client = clients[client_idx]
+            sem = get_client_semaphore(client_idx)
+            slot_end = min(slot_start + SLOT_SIZE, total)
+            try:
+                async with sem:
+                    async for offset, chunk in _byte_accurate_file_stream(
+                        client, msg, total, slot_start, slot_end
+                    ):
+                        os.pwrite(fd, chunk, offset)
+                        async with lock:
+                            downloaded += len(chunk)
+                            now = time.monotonic()
+                            if progress_callback and (now - last_ts >= 1 or downloaded >= total):
+                                await progress_callback(downloaded, total, "Downloading from Telegram")
+                                last_ts = now
+            except Exception as e:
+                async with lock:
+                    if dlerr is None:
+                        dlerr = e
+
+        tasks = []
+        for i, slot_start in enumerate(slot_starts):
+            c_idx = helper_clients[i % len(helper_clients)].pool_index
+            tasks.append(asyncio.create_task(_download_slot(slot_start, c_idx)))
+
+        try:
+            await asyncio.gather(*tasks)
+        finally:
+            os.close(fd)
+
+        if dlerr:
+            raise dlerr
 
         _log.info("Phase 1 done: downloaded %d/%d bytes", downloaded, total)
 

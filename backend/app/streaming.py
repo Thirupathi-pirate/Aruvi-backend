@@ -235,7 +235,7 @@ class StreamCache:
 class CacheManager:
     def __init__(self):
         self._caches: dict[tuple[int, int], StreamCache] = {}
-        self.ram_limit = 200 * 1024 * 1024  # 200MB global RAM limit
+        self.ram_limit = 150 * 1024 * 1024  # 150MB global RAM limit
         self._total_ram = 0
 
     def _add_ram(self, delta: int):

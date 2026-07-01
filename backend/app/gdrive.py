@@ -226,6 +226,7 @@ async def upload_streaming(
     if file_size > MAX_GDRIVE_FILE:
         raise ValueError("File exceeds 4GB limit for GDrive upload")
 
+    total = file_size
     metadata = json.dumps(
         {
             "name": file_name,

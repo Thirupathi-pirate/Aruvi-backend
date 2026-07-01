@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from ..database import get_db
 from ..models import File, User
-from ..auth import get_current_user
+from ..auth import get_current_user, get_current_user_opt, verify_token
 
 from ..telegram import get_message_from_channel, tg_client, clients
 from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
@@ -121,10 +121,20 @@ async def stream_file(
     file_id: int,
     request: Request,
     db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
+    current_user: User | None = Depends(get_current_user_opt),
     download: int = Query(0, description="Set to 1 to force download"),
 ):
     """Stream file from Telegram with range request support for seeking."""
+    # Fall back to download token if not authenticated normally
+    if not current_user:
+        token = request.query_params.get("token")
+        if token:
+            tid = verify_token(token, token_type="download")
+            if tid:
+                result = await db.execute(select(User).where(User.telegram_id == tid))
+                current_user = result.scalar_one_or_none()
+    if not current_user:
+        raise HTTPException(status_code=401, detail="Not authenticated")
     # Get file from database
     result = await db.execute(
         select(File).where(File.id == file_id, File.user_id == current_user.id)

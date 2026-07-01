@@ -124,9 +124,6 @@ def _creds_to_dict(creds: UserCredentials) -> dict:
     return {
         "token": creds.token,
         "refresh_token": creds.refresh_token,
-        "token_uri": creds.token_uri,
-        "client_id": creds.client_id,
-        "client_secret": creds.client_secret,
         "scopes": list(creds.scopes),
         "expiry": creds.expiry.isoformat() if creds.expiry else None,
     }
@@ -142,9 +139,9 @@ def _creds_from_dict(d: dict) -> UserCredentials:
     return UserCredentials(
         token=d.get("token"),
         refresh_token=d.get("refresh_token"),
-        token_uri=d.get("token_uri"),
-        client_id=d.get("client_id"),
-        client_secret=d.get("client_secret"),
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=settings.gdrive_client_id,
+        client_secret=settings.gdrive_client_secret,
         scopes=d.get("scopes", SCOPES),
         expiry=expiry,
     )

@@ -21,8 +21,7 @@ from google_auth_oauthlib.flow import Flow
 from googleapiclient.discovery import build
 
 from .config import get_settings
-from .streaming import _byte_accurate_file_stream, get_client_semaphore
-from .telegram import clients
+from .streaming import parallel_stream_generator
 
 _log = logging.getLogger(__name__)
 settings = get_settings()
@@ -236,53 +235,22 @@ async def upload_streaming(
         }
     )
 
-    # ── Phase 1: Download full file to NVMe temp (parallel byte-range) ──
+    # ── Phase 1: Download full file to NVMe temp (parallel streaming) ──
     GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
     tmp = GDRIVE_UPLOAD_DIR / f"{msg.id}_{int(time.time())}.tmp"
 
     try:
-        # ── Phase 1: Download full file to NVMe temp (parallel byte-range) ──
+        # ── Phase 1: Download full file to NVMe temp (parallel streaming) ──
         downloaded = 0
-        last_ts = 0
-        concurrency = 10
-        range_size = max(1, total // concurrency)
-        ranges = [
-            (i * range_size, min((i + 1) * range_size, total))
-            for i in range(concurrency)
-        ]
-        ranges = [(s, e) for s, e in ranges if s < e]
-
-        # Pre-allocate temp file
+        last_report = 0
         with open(tmp, "wb") as f:
-            f.truncate(total)
-
-        async def _download_range(start: int, end: int, client_idx: int):
-            nonlocal downloaded, last_ts
-            client = clients[client_idx]
-            sem = get_client_semaphore(client_idx)
-            fd = open(tmp, "r+b")
-            try:
-                fd.seek(start)
-                async with sem:
-                    async for offset, chunk in _byte_accurate_file_stream(
-                        client, msg, total, start, end
-                    ):
-                        fd.write(chunk)
-                        downloaded += len(chunk)
-                        now = time.monotonic()
-                        if progress_callback and (now - last_ts >= 1):
-                            await progress_callback(downloaded, total, "Downloading from Telegram")
-                            last_ts = now
-            finally:
-                fd.close()
-
-        helper_clients = [c for c in clients if getattr(c, "pool_index", 0) != 0]
-        tasks = []
-        for i, (s, e) in enumerate(ranges):
-            c_idx = helper_clients[i % len(helper_clients)].pool_index
-            tasks.append(asyncio.create_task(_download_range(s, e, c_idx)))
-
-        await asyncio.gather(*tasks)
+            async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10, cache=False):
+                f.write(chunk)
+                downloaded += len(chunk)
+                now = time.monotonic()
+                if progress_callback and (now - last_report >= 1 or downloaded >= total):
+                    await progress_callback(downloaded, total, "Downloading from Telegram")
+                    last_report = now
 
         _log.info("Phase 1 done: downloaded %d/%d bytes", downloaded, total)
 

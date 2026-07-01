@@ -409,14 +409,18 @@ async def _retry_chunk_with_alt_client(
     chat_id: int,
     message_id: int,
     results: dict,
+    file_size: int = 0,
 ):
     """Try fetching the chunk with a different client before giving up.
     
     Retries up to 5 full cycles with exponential backoff (2^cycle).
+    Uses byte-accurate stream instead of stream_media to avoid Pyrogram's
+    1MB-aligned part-size bug (960KB gaps).
     Handles flood wait, auth expiry, and transient network errors.
     Only yields empty bytes as absolute last resort.
     Skips bot 0 (main bot) — slow at scraping.
     """
+    CHUNK = 1024 * 1024
     pool_size = len(clients)
     max_cycles = 5
     for cycle in range(max_cycles):
@@ -429,13 +433,23 @@ async def _retry_chunk_with_alt_client(
                 alt_msg = await alt_client.get_messages(chat_id, message_id)
                 if not alt_msg:
                     continue
+                chunk_byte_start = chunk_idx * CHUNK
+                chunk_byte_end = min(chunk_byte_start + CHUNK, file_size)
                 async with get_client_semaphore(alt_c_idx):
-                    data = bytearray()
-                    async for part in alt_client.stream_media(
-                        alt_msg, limit=1, offset=chunk_idx
-                    ):
-                        data.extend(part)
-                chunk_bytes = bytes(data)
+                    d = bytearray()
+                    try:
+                        async for _, part in _byte_accurate_file_stream(
+                            alt_client, alt_msg, file_size,
+                            chunk_byte_start, chunk_byte_end,
+                        ):
+                            d.extend(part)
+                    except NotImplementedError:
+                        # CDN redirect — fall back to stream_media
+                        async for part in alt_client.stream_media(
+                            alt_msg, limit=1, offset=chunk_idx
+                        ):
+                            d.extend(part)
+                chunk_bytes = bytes(d)
                 if chunk_bytes and not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
                     return
@@ -445,13 +459,22 @@ async def _retry_chunk_with_alt_client(
                     try:
                         alt_msg = await alt_client.get_messages(chat_id, message_id)
                         if alt_msg:
+                            chunk_byte_start = chunk_idx * CHUNK
+                            chunk_byte_end = min(chunk_byte_start + CHUNK, file_size)
                             async with get_client_semaphore(alt_c_idx):
-                                data = bytearray()
-                                async for part in alt_client.stream_media(
-                                    alt_msg, limit=1, offset=chunk_idx
-                                ):
-                                    data.extend(part)
-                            chunk_bytes = bytes(data)
+                                d = bytearray()
+                                try:
+                                    async for _, part in _byte_accurate_file_stream(
+                                        alt_client, alt_msg, file_size,
+                                        chunk_byte_start, chunk_byte_end,
+                                    ):
+                                        d.extend(part)
+                                except NotImplementedError:
+                                    async for part in alt_client.stream_media(
+                                        alt_msg, limit=1, offset=chunk_idx
+                                    ):
+                                        d.extend(part)
+                            chunk_bytes = bytes(d)
                             if chunk_bytes and not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
                                 return
@@ -590,6 +613,9 @@ async def parallel_stream_generator(
     end_chunk = (offset + length - 1) // chunk_size
     total_chunks = end_chunk - start_chunk + 1
 
+    doc = initial_message.document or initial_message.video or initial_message.audio
+    file_size = doc.file_size if doc else (offset + length)
+
     chat_id = initial_message.chat.id
     message_id = initial_message.id
 
@@ -692,7 +718,7 @@ async def parallel_stream_generator(
             logger.debug("BATCH OK bot %d %d-%d: %d ch in %.1fs", c_idx, batch_start, batch_end, nchunks, elapsed)
         return current - 1 == batch_end
 
-    async def _fetch_one(chunk_offset, cl, msg, sem):
+    async def _fetch_one(chunk_offset, cl, msg, sem, msg_file_size=None):
         """Fetch a single chunk, forward-caching it on success."""
         c_idx = getattr(cl, 'pool_index', '?')
         t0 = time.perf_counter()
@@ -702,6 +728,32 @@ async def parallel_stream_generator(
                 async for part in cl.stream_media(msg, limit=1, offset=chunk_offset):
                     d.extend(part)
             data = bytes(d)
+
+            # If empty or tiny (gap bug: stream_media returns < 1MB part),
+            # fall back to byte-accurate stream for the full 1MB range
+            if not data or (len(data) < MIN_CHUNK_SIZE and chunk_offset != end_chunk):
+                chunk_byte_start = chunk_offset * chunk_size
+                chunk_byte_end = min(chunk_byte_start + chunk_size, msg_file_size or file_size)
+                logger.warning(
+                    "FETCH ONE TINY bot %d chunk %d: %d bytes — byte-accurate [%d, %d)",
+                    c_idx, chunk_offset, len(data), chunk_byte_start, chunk_byte_end,
+                )
+                try:
+                    async with sem:
+                        d = bytearray()
+                        async for _, part in _byte_accurate_file_stream(
+                            cl, msg, msg_file_size or file_size,
+                            chunk_byte_start, chunk_byte_end,
+                        ):
+                            d.extend(part)
+                    data = bytes(d)
+                except NotImplementedError:
+                    logger.warning("FETCH ONE CDN bot %d chunk %d — cannot use byte-accurate", c_idx, chunk_offset)
+                    return None
+                except Exception as e:
+                    logger.warning("FETCH ONE FALLBACK FAIL bot %d chunk %d: %s", c_idx, chunk_offset, e)
+                    return None
+
             if not data:
                 logger.warning("FETCH ONE EMPTY bot %d chunk %d in %.1fs", c_idx, chunk_offset, time.perf_counter() - t0)
                 return None
@@ -838,7 +890,7 @@ async def parallel_stream_generator(
                         logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                 except Exception as e:
                     logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
+                await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results, file_size)
             task_queue.task_done()
 
         elapsed = time.perf_counter() - t0

@@ -130,6 +130,22 @@ def _dc_disk_size() -> int:
     return total
 
 
+class _NullCache:
+    """No-op cache — used when parallel_stream_generator(cache=False).
+    All methods are no-ops; get() always returns None (cache miss).
+    Position is tracked for refill backpressure.
+    """
+    def __init__(self):
+        self.position = 0
+        self._data: dict = {}
+        self._size = 0
+    def store(self, *args, **kwargs): pass
+    def get(self, key): return None
+    def set_position(self, pos): self.position = pos
+    @property
+    def info(self): return {"hits": 0, "evictions": 0}
+
+
 class StreamCache:
     """Position-aware sliding window cache for one video stream.
     Chunks within [-BACK_WINDOW, +FWD_WINDOW] of current playback position
@@ -460,11 +476,15 @@ async def parallel_stream_generator(
     length: int,
     chunk_size: int = 1024 * 1024,
     concurrency: int = None,
+    cache: bool = True,
 ):
     """
     Fetch file chunks in parallel using the client pool.
     Each worker uses its own client and fetches its own Message object
     to avoid cross-bot FILE_REFERENCE_INVALID errors.
+    When cache=False, chunks are served directly from futures without
+    going through the sliding-window RAM cache (reduces memory for
+    non-interactive downloads like GDrive uploads).
     """
     pool_size = len(clients)
     # Only helper bots (1-13) used for streaming — bot 0 is slow at scraping
@@ -494,7 +514,7 @@ async def parallel_stream_generator(
     _forward_streams[message_id] = {"chat_id": chat_id, "results": results, "total_chunks": total_chunks, "updated_at": time.monotonic()}
 
     # Check cache (RAM → disk) — pre-set futures for cached chunks
-    video_cache = _cache_manager.get_cache(chat_id, message_id)
+    video_cache = _NullCache() if not cache else _cache_manager.get_cache(chat_id, message_id)
     cache_hits = 0
     uncached_ranges: list[tuple[int, int]] = []
     range_start = None

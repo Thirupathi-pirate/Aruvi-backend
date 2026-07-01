@@ -263,7 +263,7 @@ async def upload_streaming(
             downloaded = 0
             last_report = 0
             with open(tmp, "wb") as f:
-                async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10):
+                async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10, cache=False):
                     f.write(chunk)
                     downloaded += len(chunk)
                     now = time.monotonic()

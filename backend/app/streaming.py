@@ -491,7 +491,7 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
 
     session = client.media_sessions.get(dc_id)
     if not session:
-        session = client.media_sessions[dc_id] = Session(
+        session = Session(
             client, dc_id,
             await Auth(client, dc_id, await client.storage.test_mode()).create()
             if dc_id != await client.storage.dc_id()
@@ -519,6 +519,7 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
                     break
             else:
                 raise AuthKeyUnregistered("Could not export auth to file DC")
+        client.media_sessions[dc_id] = session
 
     MAX_CHUNK = 1024 * 1024
     pos = offset_start
@@ -549,6 +550,10 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
                 ),
                 sleep_threshold=client.sleep_threshold,
             )
+        except Exception as _e:
+            if "AUTH_KEY_UNREGISTERED" in str(_e):
+                client.media_sessions.pop(dc_id, None)
+            raise
 
         if isinstance(r, raw.types.upload.File):
             chunk = r.bytes

@@ -15,7 +15,7 @@ BATCH_SIZE = 10  # 10MB per batch (10 × 1MB chunks)
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 MIN_CHUNK_SIZE = 10 * 1024  # 10KB — smaller chunks trigger retry with fresh file ref
 DISK_CACHE_BASE = "data/chunks"
-DISK_CACHE_TTL = 3 * 3600  # 3 hours
+DISK_CACHE_TTL = 1 * 3600  # 1 hour
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
 # Per-stream sliding window: 100MB forward + 20MB backward in RAM
@@ -235,6 +235,7 @@ class StreamCache:
 class CacheManager:
     def __init__(self):
         self._caches: dict[tuple[int, int], StreamCache] = {}
+        self._refcounts: dict[tuple[int, int], int] = {}
         self.ram_limit = 150 * 1024 * 1024  # 150MB global RAM limit
         self._total_ram = 0
 
@@ -270,7 +271,18 @@ class CacheManager:
         key = (chat_id, message_id)
         if key not in self._caches:
             self._caches[key] = StreamCache(chat_id, message_id)
+            self._refcounts[key] = 0
+        self._refcounts[key] += 1
         return self._caches[key]
+
+    def release_cache(self, chat_id: int, message_id: int):
+        key = (chat_id, message_id)
+        if key not in self._refcounts:
+            return
+        self._refcounts[key] -= 1
+        if self._refcounts[key] <= 0:
+            self._refcounts.pop(key, None)
+            self.remove(chat_id, message_id)
 
     def remove(self, chat_id: int, message_id: int):
         key = (chat_id, message_id)
@@ -928,7 +940,7 @@ async def parallel_stream_generator(
         for w in worker_tasks:
             w.cancel()
         await asyncio.gather(refill_task, *worker_tasks, return_exceptions=True)
-        _cache_manager.remove(chat_id, message_id)
+        _cache_manager.release_cache(chat_id, message_id)
         elapsed = time.perf_counter() - stream_start
         logger.debug("STREAM END msg %d: %d ch in %.1fs, peak forward %.0f MB", message_id, total_chunks, elapsed, _forward_streams.get(message_id, {}).get("results", {}))
         if total_chunks:

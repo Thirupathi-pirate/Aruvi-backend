@@ -432,7 +432,7 @@ async def _retry_chunk_with_alt_client(
                     ):
                         data.extend(part)
                 chunk_bytes = bytes(data)
-                if not results[chunk_idx].done():
+                if chunk_bytes and not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
                     return
             except AuthKeyUnregistered:
@@ -448,7 +448,7 @@ async def _retry_chunk_with_alt_client(
                                 ):
                                     data.extend(part)
                             chunk_bytes = bytes(data)
-                            if not results[chunk_idx].done():
+                            if chunk_bytes and not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
                                 return
                     except Exception:
@@ -582,10 +582,13 @@ async def parallel_stream_generator(
                         if current > batch_end:
                             break
                         data = bytes(part)
-                        video_cache.store(current, data)
-                        if not results[current].done():
-                            results[current].set_result(data)
-                        current += 1
+                        if data:
+                            video_cache.store(current, data)
+                            if not results[current].done():
+                                results[current].set_result(data)
+                            current += 1
+                        else:
+                            logger.warning("BATCH EMPTY bot %d chunk %d in range %d-%d", c_idx, current, batch_start, batch_end)
         except (asyncio.TimeoutError, ConnectionError, OSError, AuthKeyUnregistered) as e:
             logger.warning("BATCH ABORT bot %d %d-%d: %s", c_idx, batch_start, batch_end, e)
             return False
@@ -607,6 +610,9 @@ async def parallel_stream_generator(
                 async for part in cl.stream_media(msg, limit=1, offset=chunk_offset):
                     d.extend(part)
             data = bytes(d)
+            if not data:
+                logger.warning("FETCH ONE EMPTY bot %d chunk %d in %.1fs", c_idx, chunk_offset, time.perf_counter() - t0)
+                return None
             video_cache.store(chunk_offset, data)
             elapsed = time.perf_counter() - t0
             logger.debug("FETCH ONE bot %d chunk %d in %.1fs", c_idx, chunk_offset, elapsed)
@@ -709,10 +715,11 @@ async def parallel_stream_generator(
                             async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
                                 d.extend(part)
                         data = bytes(d)
-                        video_cache.store(chunk_offset, data)
-                        if not results[chunk_offset].done():
-                            results[chunk_offset].set_result(data)
-                        continue
+                        if data:
+                            video_cache.store(chunk_offset, data)
+                            if not results[chunk_offset].done():
+                                results[chunk_offset].set_result(data)
+                            continue
                     except Exception as e2:
                         logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
                 except AuthKeyUnregistered:
@@ -725,10 +732,11 @@ async def parallel_stream_generator(
                                 async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
                                     d.extend(part)
                             data = bytes(d)
-                            video_cache.store(chunk_offset, data)
-                            if not results[chunk_offset].done():
-                                results[chunk_offset].set_result(data)
-                            continue
+                            if data:
+                                video_cache.store(chunk_offset, data)
+                                if not results[chunk_offset].done():
+                                    results[chunk_offset].set_result(data)
+                                continue
                         except Exception as e2:
                             logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
                     else:

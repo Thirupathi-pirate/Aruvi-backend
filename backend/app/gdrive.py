@@ -226,8 +226,6 @@ async def upload_streaming(
     if file_size > MAX_GDRIVE_FILE:
         raise ValueError("File exceeds 4GB limit for GDrive upload")
 
-    access_token = get_access_token(token_dict)
-
     metadata = json.dumps(
         {
             "name": file_name,
@@ -236,39 +234,46 @@ async def upload_streaming(
         }
     )
 
-    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
-        session_resp = await client.post(
-            "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
-            headers={
-                "Authorization": f"Bearer {access_token}",
-                "Content-Type": "application/json; charset=UTF-8",
-                "X-Upload-Content-Type": mime_type,
-                "X-Upload-Content-Length": str(file_size),
-            },
-            content=metadata,
-        )
-        session_resp.raise_for_status()
-        upload_url = session_resp.headers["Location"]
+    # ── Phase 1: Download full file to NVMe temp (13-bot parallel) ──
+    GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    tmp = GDRIVE_UPLOAD_DIR / f"{msg.id}_{int(time.time())}.tmp"
 
-        total = file_size
+    try:
+        downloaded = 0
+        last_report = 0
+        with open(tmp, "wb") as f:
+            async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10, cache=False):
+                f.write(chunk)
+                downloaded += len(chunk)
+                now = time.monotonic()
+                if progress_callback and (now - last_report >= 1 or downloaded >= total):
+                    await progress_callback(downloaded, total, "Downloading from Telegram")
+                    last_report = now
 
-        # ── Phase 1: Download full file to NVMe temp (13-bot parallel) ──
-        GDRIVE_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
-        tmp = GDRIVE_UPLOAD_DIR / f"{msg.id}_{int(time.time())}.tmp"
+        # Validate download completed fully
+        if downloaded < total:
+            raise RuntimeError(
+                f"Incomplete download: {downloaded}/{total} bytes "
+                f"({downloaded * 100 // total}%). "
+                f"Telegram likely dropped chunks. Try again."
+            )
 
-        try:
-            downloaded = 0
-            last_report = 0
-            with open(tmp, "wb") as f:
-                async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10, cache=False):
-                    f.write(chunk)
-                    downloaded += len(chunk)
-                    now = time.monotonic()
-                    if progress_callback and (now - last_report >= 1 or downloaded >= total):
-                        await progress_callback(downloaded, total, "Downloading from Telegram")
-                        last_report = now
+        # ── Phase 2: Upload sequentially to Drive ──
+        access_token = get_access_token(token_dict)
+        async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
+            session_resp = await client.post(
+                "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
+                headers={
+                    "Authorization": f"Bearer {access_token}",
+                    "Content-Type": "application/json; charset=UTF-8",
+                    "X-Upload-Content-Type": mime_type,
+                    "X-Upload-Content-Length": str(downloaded),
+                },
+                content=metadata,
+            )
+            session_resp.raise_for_status()
+            upload_url = session_resp.headers["Location"]
 
-            # ── Phase 2: Upload sequentially to Drive ──
             uploaded = 0
             last_report = 0
             resp = None
@@ -279,15 +284,15 @@ async def upload_streaming(
                         break
                     start = uploaded
                     end = uploaded + len(chunk) - 1
-                    resp = await _upload_block(client, upload_url, chunk, start, end, total)
+                    resp = await _upload_block(client, upload_url, chunk, start, end, downloaded)
                     uploaded += len(chunk)
                     now = time.monotonic()
-                    if progress_callback and (now - last_report >= 1 or uploaded >= total):
-                        await progress_callback(uploaded, total, "Uploading to Google Drive")
+                    if progress_callback and (now - last_report >= 1 or uploaded >= downloaded):
+                        await progress_callback(uploaded, downloaded, "Uploading to Google Drive")
                         last_report = now
 
-        finally:
-            tmp.unlink(missing_ok=True)
+    finally:
+        tmp.unlink(missing_ok=True)
 
     if resp is None:
         raise RuntimeError("No chunks were uploaded (empty file?)")

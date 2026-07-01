@@ -208,7 +208,7 @@ async def ensure_aruvi_folder(service) -> str:
 
 
 GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
-CHUNK_SIZE = 10 * 1024 * 1024
+CHUNK_SIZE = 20 * 1024 * 1024
 MAX_GDRIVE_FILE = 4 * 1024 * 1024 * 1024
 
 
@@ -222,7 +222,7 @@ async def upload_streaming(
     progress_callback=None,
 ) -> str:
     """Download the full file to NVMe temp (via 13-bot parallel streaming,
-    then upload sequentially to Google Drive with 10MB chunks.
+    then upload sequentially to Google Drive with 20MB chunks.
     Deletes the temp file after upload.
     """
     if file_size > MAX_GDRIVE_FILE:
@@ -250,7 +250,7 @@ async def upload_streaming(
         last_ts = 0
         dlerr = None
         lock = asyncio.Lock()
-        fd = os.open(tmp, os.O_RDWR)
+        fd = os.open(tmp, os.O_RDWR | os.O_DSYNC)
 
         # Split file into 1MB slots — each slot is one _byte_accurate_file_stream call
         SLOT_SIZE = 1024 * 1024
@@ -275,6 +275,7 @@ async def upload_streaming(
                             client, msg, total, slot_start, slot_end
                         ):
                             os.pwrite(fd, chunk, offset)
+                            os.posix_fadvise(fd, offset, len(chunk), os.POSIX_FADV_DONTNEED)
                             async with lock:
                                 downloaded += len(chunk)
                                 now = time.monotonic()

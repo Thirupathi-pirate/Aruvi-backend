@@ -239,7 +239,7 @@ async def upload_streaming(
         }
     )
 
-    async with httpx.AsyncClient() as client:
+    async with httpx.AsyncClient(timeout=httpx.Timeout(120.0, connect=15.0)) as client:
         session_resp = await client.post(
             "https://www.googleapis.com/upload/drive/v3/files?uploadType=resumable",
             headers={

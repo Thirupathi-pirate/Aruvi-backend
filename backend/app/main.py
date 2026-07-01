@@ -4,6 +4,7 @@ FastAPI main application with Telegram MTProto client lifecycle.
 import asyncio
 import logging
 import os
+import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -48,13 +49,20 @@ async def _cleanup_disk_cache_1h():
         await asyncio.to_thread(_dc_cleanup_old)
 
 
+_last_oom_clear = 0.0
+_OOM_CLEAR_COOLDOWN = 60
+
+
 async def _oom_guard_30s():
     """Background OOM guard: clear in-memory caches when RAM exceeds 80%."""
+    global _last_oom_clear
     while True:
         await asyncio.sleep(30)
         try:
             cur, mx = _discover_cgroup_memory()
-            if cur is not None and mx is not None and cur > 0.8 * mx:
+            now = time.monotonic()
+            if cur is not None and mx is not None and cur > 0.8 * mx and now - _last_oom_clear > _OOM_CLEAR_COOLDOWN:
+                _last_oom_clear = now
                 from .streaming import _cache_manager as cm, _forward_streams as fs
                 active = {(info["chat_id"], mid) for mid, info in list(fs.items())}
                 freed = cm.clear_all(exclude_keys=active)

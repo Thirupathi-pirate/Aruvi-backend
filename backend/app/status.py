@@ -174,8 +174,8 @@ def _read_memory_stat() -> dict[str, int] | None:
                     if cg and cg != "/":
                         with open(f"/sys/fs/cgroup{cg}/memory.stat") as sf:
                             result = {}
-                            for line in sf:
-                                k, _, v = line.partition(" ")
+                            for entry in sf:
+                                k, _, v = entry.partition(" ")
                                 result[k] = int(v.strip())
                             return result
     except Exception:
@@ -197,15 +197,39 @@ def _sum_memory_stat(stat: dict) -> int:
 _SUSPICIOUSLY_LOW = 500 * 1024 * 1024  # 500 MB
 
 
+def _own_cgroup_path() -> str | None:
+    try:
+        with open("/proc/self/cgroup") as f:
+            for line in f:
+                if line.startswith("0::"):
+                    return line.strip()[3:]
+    except OSError:
+        pass
+    return None
+
+
 def _sum_proc_rss() -> int:
     global _proc_rss_cache
     now = time.monotonic()
     if now - _proc_rss_cache[0] < _PROC_RSS_TTL:
         return _proc_rss_cache[1]
+    own_cgroup = _own_cgroup_path()
     total = 0
     for entry in os.listdir("/proc"):
         if not entry.isdigit():
             continue
+        if own_cgroup is not None:
+            try:
+                with open(f"/proc/{entry}/cgroup") as cf:
+                    for cline in cf:
+                        if cline.startswith("0::"):
+                            pid_cgroup = cline.strip()[3:]
+                            if pid_cgroup != own_cgroup:
+                                break
+                    else:
+                        continue
+            except OSError:
+                continue
         try:
             with open(f"/proc/{entry}/status") as f:
                 for line in f:

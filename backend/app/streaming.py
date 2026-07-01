@@ -137,13 +137,11 @@ class _NullCache:
     """
     def __init__(self):
         self.position = 0
-        self._data: dict = {}
-        self._size = 0
     def store(self, *args, **kwargs): pass
     def get(self, key): return None
     def set_position(self, pos): self.position = pos
     @property
-    def info(self): return {"hits": 0, "evictions": 0}
+    def info(self): return {"chunks": 0, "size_mb": 0, "hits": 0, "misses": 0, "evictions": 0}
 
 
 class StreamCache:
@@ -245,6 +243,10 @@ class CacheManager:
         if not active:
             return False
         target = max(active, key=lambda c: c._size)
+        if not target._data:
+            self._total_ram = max(0, self._total_ram - target._size)
+            target._size = 0
+            return True
         farthest = max(target._data.keys(), key=lambda k: abs(k - target.position))
         data = target._data.pop(farthest)
         target._size -= len(data)
@@ -430,7 +432,6 @@ async def _retry_chunk_with_alt_client(
                     ):
                         data.extend(part)
                 chunk_bytes = bytes(data)
-                _cache_manager.get_cache(chat_id, message_id).store(chunk_idx, chunk_bytes)
                 if not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
                     return
@@ -447,7 +448,6 @@ async def _retry_chunk_with_alt_client(
                                 ):
                                     data.extend(part)
                             chunk_bytes = bytes(data)
-                            _cache_manager.get_cache(chat_id, message_id).store(chunk_idx, chunk_bytes)
                             if not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
                                 return
@@ -787,7 +787,10 @@ async def parallel_stream_generator(
                 first_chunk_logged = True
             elif offset % 500 == 0:
                 done_futures = sum(1 for f in list(results.values()) if f.done())
-                logger.info("VERBOSE: yielded %d, done futures %d/%d, queue %d, ram %d ch %.0f MB", chunk_idx, done_futures, total_chunks, task_queue.qsize(), len(video_cache._data), video_cache._size / 1024 / 1024)
+                if isinstance(video_cache, _NullCache):
+                    logger.info("VERBOSE: yielded %d, done futures %d/%d, queue %d (cache bypass)", chunk_idx, done_futures, total_chunks, task_queue.qsize())
+                else:
+                    logger.info("VERBOSE: yielded %d, done futures %d/%d, queue %d, ram %d ch %.0f MB", chunk_idx, done_futures, total_chunks, task_queue.qsize(), len(video_cache._data), video_cache._size / 1024 / 1024)
             yield chunk_data
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
@@ -800,6 +803,7 @@ async def parallel_stream_generator(
         refill_task.cancel()
         for w in worker_tasks:
             w.cancel()
+        await asyncio.gather(refill_task, *worker_tasks, return_exceptions=True)
         _cache_manager.remove(chat_id, message_id)
         elapsed = time.perf_counter() - stream_start
         logger.debug("STREAM END msg %d: %d ch in %.1fs, peak forward %.0f MB", message_id, total_chunks, elapsed, _forward_streams.get(message_id, {}).get("results", {}))

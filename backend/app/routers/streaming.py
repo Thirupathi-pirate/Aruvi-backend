@@ -14,7 +14,7 @@ from ..models import File, User
 from ..auth import get_current_user, get_current_user_opt, verify_token, verify_token_payload
 
 from ..telegram import get_message_from_channel, tg_client, clients
-from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
+from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams
 from ..config import get_settings
 from ..rate_limit import limiter
 

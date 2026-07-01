@@ -18,7 +18,7 @@ from .database import init_db
 from .rate_limit import limiter
 from .telegram import start_telegram_client, stop_telegram_client
 from .status import get_status, attach_ring_handler, clear_logs, _discover_cgroup_memory
-from .streaming import _dc_cleanup_old
+
 from .routers import files_router, folders_router, streaming_router, auth_router, tv_router, admin_router, gdrive_router, legal_router
 
 # Import bot to register handlers
@@ -40,14 +40,6 @@ async def _clear_cache_4h():
         freed = cm.clear_all(exclude_keys=active)
         kept = len(active)
         logger.info("Chunk cache cleared: freed %.1f MB (%d active streams preserved)", freed / 1024 / 1024, kept)
-
-
-async def _cleanup_disk_cache_1h():
-    """Remove NVMe chunk files older than 3 hours."""
-    while True:
-        await asyncio.sleep(3600)
-        await asyncio.to_thread(_dc_cleanup_old)
-
 
 _last_oom_clear = 0.0
 _OOM_CLEAR_COOLDOWN = 60
@@ -85,20 +77,17 @@ async def lifespan(app: FastAPI):
     # Start background cleanup  
     cleanup_task = asyncio.create_task(_cleanup_expired_codes())
     cache_clear_task = asyncio.create_task(_clear_cache_4h())
-    disk_cache_task = asyncio.create_task(_cleanup_disk_cache_1h())
     oom_task = asyncio.create_task(_oom_guard_30s())
     
     yield
     
     cleanup_task.cancel()
     cache_clear_task.cancel()
-    disk_cache_task.cancel()
     oom_task.cancel()
     startup_task.cancel()
     try:
         await cleanup_task
         await cache_clear_task
-        await disk_cache_task
         await oom_task
         await startup_task
     except asyncio.CancelledError:

@@ -625,6 +625,7 @@ async def parallel_stream_generator(
 
     # Check cache (RAM → disk) — pre-set futures for cached chunks
     video_cache = _NullCache() if not cache else _cache_manager.get_cache(chat_id, message_id)
+    video_cache.set_position(start_chunk)
     cache_hits = 0
     uncached_ranges: list[tuple[int, int]] = []
     range_start = None

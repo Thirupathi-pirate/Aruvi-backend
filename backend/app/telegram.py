@@ -186,10 +186,23 @@ async def _warmup_messages():
 
 
 async def _finish_startup():
-    """Start helper bots in parallel, verify storage channel access, warm up."""
+    """Start helper bots in background, wait for ≥6 to connect, then warm up."""
     if len(clients) > 1:
-        tasks = [start_one_client(i, c) for i, c in enumerate(clients[1:], 1)]
-        await asyncio.gather(*tasks)
+        # Fire all helpers as background tasks (never block on all)
+        for i, c in enumerate(clients[1:], 1):
+            asyncio.create_task(start_one_client(i, c))
+
+        # Poll until at least MIN_HELPERS are connected (or 30s timeout)
+        MIN_HELPERS = 6
+        for _ in range(60):
+            connected = sum(
+                1 for c in clients
+                if getattr(c, 'pool_index', 0) != 0 and c.is_connected
+            )
+            if connected >= MIN_HELPERS:
+                break
+            await asyncio.sleep(0.5)
+        diag_log(f"Helper check: {connected}/{len(clients)-1} connected")
 
     # Verify each bot can access the storage channel
     channel_id = settings.telegram_storage_channel_id

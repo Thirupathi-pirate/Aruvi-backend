@@ -248,12 +248,18 @@ async def upload_streaming(
 
         try:
             downloaded = 0
+            next_report = 5 * 1024 * 1024  # report every 5MB
             with open(tmp, "wb") as f:
                 async for chunk in parallel_stream_generator(msg, offset=0, length=total):
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(downloaded, total)
+                    if downloaded >= next_report:
+                        if progress_callback:
+                            await progress_callback(downloaded, total)
+                        next_report = downloaded + 5 * 1024 * 1024
+            # Final 100% report
+            if progress_callback:
+                await progress_callback(downloaded, total)
 
             # ── Phase 2: Upload sequentially to Drive ──
             uploaded = 0

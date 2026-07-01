@@ -528,7 +528,7 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
         try:
             r = await session.invoke(
                 raw.functions.upload.GetFile(
-                    location=location, offset=pos, limit=MAX_CHUNK,
+                    location=location, offset=pos, limit=MAX_CHUNK, precise=True,
                 ),
                 sleep_threshold=client.sleep_threshold,
             )
@@ -545,13 +545,14 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
             )
             r = await session.invoke(
                 raw.functions.upload.GetFile(
-                    location=location, offset=pos, limit=MAX_CHUNK,
+                    location=location, offset=pos, limit=MAX_CHUNK, precise=True,
                 ),
                 sleep_threshold=client.sleep_threshold,
             )
         except Exception as _e:
-            if "AUTH_KEY_UNREGISTERED" in str(_e):
+            if "AUTH_KEY_UNREGISTERED" in str(_e) or "LIMIT_INVALID" in str(_e):
                 client.media_sessions.pop(dc_id, None)
+                logger.warning("Evicted stale session for DC %d (%s)", dc_id, str(_e)[:50])
             raise
 
         if isinstance(r, raw.types.upload.File):

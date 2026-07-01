@@ -511,8 +511,10 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
                             id=exported.id, bytes=exported.bytes
                         )
                     )
-                except AuthKeyUnregistered:
-                    continue
+                except (AuthKeyUnregistered, Exception) as _e:
+                    if isinstance(_e, AuthKeyUnregistered) or "AUTH_BYTES_INVALID" in str(_e):
+                        continue
+                    raise
                 else:
                     break
             else:

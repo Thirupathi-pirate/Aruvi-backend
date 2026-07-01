@@ -174,7 +174,16 @@ async def stream_file(
     async def file_streamer():
         """Generator that streams file chunks from Telegram MTProto."""
         try:
-            async with asyncio.timeout(300):
+            if range_header:
+                async with asyncio.timeout(300):
+                    async for chunk in stream_file_chunks(
+                        tg_client,
+                        message,
+                        from_bytes,
+                        until_bytes
+                    ):
+                        yield chunk
+            else:
                 async for chunk in stream_file_chunks(
                     tg_client,
                     message,
@@ -336,7 +345,16 @@ async def stream_public_file(
     async def file_streamer():
         """Generator that streams file chunks from Telegram MTProto."""
         try:
-            async with asyncio.timeout(300):
+            if range_header:
+                async with asyncio.timeout(300):
+                    async for chunk in stream_file_chunks(
+                        tg_client,
+                        message,
+                        from_bytes,
+                        until_bytes
+                    ):
+                        yield chunk
+            else:
                 async for chunk in stream_file_chunks(
                     tg_client,
                     message,

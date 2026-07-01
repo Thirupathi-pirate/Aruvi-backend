@@ -11,18 +11,18 @@ import logging
 from typing import AsyncGenerator
 from pathlib import Path
 
-BATCH_SIZE = 5  # 5MB per batch (5 × 1MB chunks)
+BATCH_SIZE = 10  # 10MB per batch (10 × 1MB chunks)
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
-MIN_CHUNK_SIZE = 100 * 1024  # 100KB — smaller chunks trigger retry with fresh file ref
+MIN_CHUNK_SIZE = 10 * 1024  # 10KB — smaller chunks trigger retry with fresh file ref
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
 
-# Per-stream sliding window: 300MB forward + 100MB backward in RAM
-# Global RAM limit: 500MB across ALL streams (enforced by CacheManager)
+# Per-stream sliding window: 100MB forward + 20MB backward in RAM
+# Global RAM limit: 200MB across ALL streams (enforced by CacheManager)
 # Excess spills to NVMe disk (3h TTL)
-FWD_WINDOW = 300  # 300MB forward cache per stream
-BACK_WINDOW = 100  # 100MB backward cache per stream
+FWD_WINDOW = 100  # 100MB forward cache per stream
+BACK_WINDOW = 20  # 20MB backward cache per stream
 
 
 def _dc_path(chat_id: int, message_id: int, chunk_idx: int) -> str:
@@ -43,7 +43,12 @@ def _dc_put(chat_id: int, message_id: int, chunk_idx: int, data: bytes):
     p = _dc_path(chat_id, message_id, chunk_idx)
     try:
         os.makedirs(os.path.dirname(p), exist_ok=True)
-        Path(p).write_bytes(data)
+        fd = os.open(p, os.O_WRONLY | os.O_CREAT | os.O_TRUNC)
+        try:
+            os.write(fd, data)
+            os.posix_fadvise(fd, 0, len(data), os.POSIX_FADV_DONTNEED)
+        finally:
+            os.close(fd)
         logger.debug("DCACHE PUT %s:%d chunk %d (%d bytes)", chat_id, message_id, chunk_idx, len(data))
     except OSError as e:
         logger.error("Disk cache write failed for %s: %s", p, e)
@@ -225,7 +230,7 @@ class StreamCache:
 class CacheManager:
     def __init__(self):
         self._caches: dict[tuple[int, int], StreamCache] = {}
-        self.ram_limit = 500 * 1024 * 1024  # 500MB global RAM limit
+        self.ram_limit = 200 * 1024 * 1024  # 200MB global RAM limit
         self._total_ram = 0
 
     def _add_ram(self, delta: int):
@@ -640,16 +645,17 @@ async def parallel_stream_generator(
     # Task queue — only filled up to MAX_AHEAD ahead of current position
     # Prevents the forward buffer of resolved futures from exhausting RAM
     task_queue = asyncio.Queue()
-    MAX_AHEAD = 300  # max 300MB of resolved futures ahead
+    MAX_AHEAD = 100  # max 100MB of resolved futures ahead
 
     async def refill_queue():
         total_queued = 0
+        bypass_throttle = isinstance(video_cache, _NullCache)
         for rstart, rend in uncached_ranges:
             # Fast-start: first N chunks as 1-chunk batches (parallel across all bots)
             fast_count = min(concurrency, rend - rstart + 1)
             for i in range(fast_count):
                 while True:
-                    if rstart + i <= video_cache.position + MAX_AHEAD:
+                    if bypass_throttle or rstart + i <= video_cache.position + MAX_AHEAD:
                         await task_queue.put((rstart + i, rstart + i))
                         total_queued += 1
                         break
@@ -658,7 +664,7 @@ async def parallel_stream_generator(
             for batch_start in range(rstart + fast_count, rend + 1, BATCH_SIZE):
                 batch_end = min(batch_start + BATCH_SIZE - 1, rend)
                 while True:
-                    if batch_start <= video_cache.position + MAX_AHEAD:
+                    if bypass_throttle or batch_start <= video_cache.position + MAX_AHEAD:
                         await task_queue.put((batch_start, batch_end))
                         total_queued += 1
                         break
@@ -677,21 +683,20 @@ async def parallel_stream_generator(
         current = batch_start
         try:
             async with sem:
-                async with asyncio.timeout(60):
-                    async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
-                        if current > batch_end:
-                            break
-                        data = bytes(part)
-                        if data and (len(data) >= MIN_CHUNK_SIZE or current == end_chunk):
-                            video_cache.store(current, data)
-                            if not results[current].done():
-                                results[current].set_result(data)
-                            current += 1
-                        elif data:
-                            logger.warning("BATCH TINY bot %d chunk %d in range %d-%d: %d bytes", c_idx, current, batch_start, batch_end, len(data))
-                        else:
-                            logger.warning("BATCH EMPTY bot %d chunk %d in range %d-%d", c_idx, current, batch_start, batch_end)
-        except (asyncio.TimeoutError, ConnectionError, OSError, AuthKeyUnregistered) as e:
+                async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
+                    if current > batch_end:
+                        break
+                    data = bytes(part)
+                    if data and (len(data) >= MIN_CHUNK_SIZE or current == end_chunk):
+                        video_cache.store(current, data)
+                        if not results[current].done():
+                            results[current].set_result(data)
+                        current += 1
+                    elif data:
+                        logger.warning("BATCH TINY bot %d chunk %d in range %d-%d: %d bytes", c_idx, current, batch_start, batch_end, len(data))
+                    else:
+                        logger.warning("BATCH EMPTY bot %d chunk %d in range %d-%d", c_idx, current, batch_start, batch_end)
+        except (ConnectionError, OSError, AuthKeyUnregistered) as e:
             logger.warning("BATCH ABORT bot %d %d-%d: %s", c_idx, batch_start, batch_end, e)
             return False
         elapsed = time.perf_counter() - t0

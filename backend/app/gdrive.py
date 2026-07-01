@@ -196,7 +196,7 @@ async def ensure_aruvi_folder(service) -> str:
 
 
 GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
-CHUNK_SIZE = 1024 * 1024
+CHUNK_SIZE = 5 * 1024 * 1024
 MAX_GDRIVE_FILE = 4 * 1024 * 1024 * 1024
 
 

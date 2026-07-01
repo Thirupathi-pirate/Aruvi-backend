@@ -334,7 +334,10 @@ def get_forward_snapshot() -> list[dict]:
 
 
 from pyrogram import Client
+from pyrogram import raw
+from pyrogram.file_id import FileId
 from pyrogram.errors import FileReferenceExpired, FileReferenceInvalid, AuthKeyUnregistered
+from pyrogram.session import Session, Auth
 
 from .telegram import clients, reconnect_client
 from .config import get_settings
@@ -469,6 +472,92 @@ async def _retry_chunk_with_alt_client(
     if not results[chunk_idx].done():
         logger.error("All retries exhausted for chunk %d — inserting empty bytes", chunk_idx)
         results[chunk_idx].set_result(b"")
+
+
+async def _byte_accurate_file_stream(client, message, file_size: int, offset_start: int, offset_end: int):
+    """Download byte range using direct upload.GetFile with correct byte-level offsets.
+    
+    Fixes Pyrogram's bug where offset advances by 1MB regardless of actual bytes returned.
+    Yields (byte_offset, chunk_data) tuples. Non-CDN files only — raises on CDN redirect.
+    """
+    file_id_obj = FileId.decode(message.document.file_id)
+    location = raw.types.InputDocumentFileLocation(
+        id=file_id_obj.media_id,
+        access_hash=file_id_obj.access_hash,
+        file_reference=file_id_obj.file_reference,
+        thumb_size=file_id_obj.thumbnail_size or "",
+    )
+    dc_id = file_id_obj.dc_id
+
+    session = client.media_sessions.get(dc_id)
+    if not session:
+        session = client.media_sessions[dc_id] = Session(
+            client, dc_id,
+            await Auth(client, dc_id, await client.storage.test_mode()).create()
+            if dc_id != await client.storage.dc_id()
+            else await client.storage.auth_key(),
+            await client.storage.test_mode(),
+            is_media=True,
+        )
+        await session.start()
+        if dc_id != await client.storage.dc_id():
+            for _ in range(3):
+                exported = await client.invoke(
+                    raw.functions.auth.ExportAuthorization(dc_id=dc_id)
+                )
+                try:
+                    await session.invoke(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported.id, bytes=exported.bytes
+                        )
+                    )
+                except AuthKeyUnregistered:
+                    continue
+                else:
+                    break
+            else:
+                raise AuthKeyUnregistered("Could not export auth to file DC")
+
+    MAX_CHUNK = 1024 * 1024
+    pos = offset_start
+    cache_key = None
+    while pos < offset_end:
+        remaining = min(MAX_CHUNK, offset_end - pos)
+        try:
+            r = await session.invoke(
+                raw.functions.upload.GetFile(
+                    location=location, offset=pos, limit=remaining,
+                ),
+                sleep_threshold=client.sleep_threshold,
+            )
+        except (FileReferenceExpired, FileReferenceInvalid):
+            refreshed = await client.get_messages(message.chat.id, message.id)
+            if not refreshed or not refreshed.document:
+                break
+            file_id_obj = FileId.decode(refreshed.document.file_id)
+            location = raw.types.InputDocumentFileLocation(
+                id=file_id_obj.media_id,
+                access_hash=file_id_obj.access_hash,
+                file_reference=file_id_obj.file_reference,
+                thumb_size=file_id_obj.thumbnail_size or "",
+            )
+            r = await session.invoke(
+                raw.functions.upload.GetFile(
+                    location=location, offset=pos, limit=remaining,
+                ),
+                sleep_threshold=client.sleep_threshold,
+            )
+
+        if isinstance(r, raw.types.upload.File):
+            chunk = r.bytes
+            if not chunk:
+                break
+            yield pos, chunk
+            pos += len(chunk)
+        elif isinstance(r, raw.types.upload.FileCdnRedirect):
+            raise NotImplementedError("CDN redirect not supported in byte-accurate stream")
+        else:
+            break
 
 
 async def parallel_stream_generator(

@@ -64,8 +64,8 @@ class Settings(BaseSettings):
 
     telegram_storage_channel_id: int
 
-    # Database (default: Supabase PostgreSQL)
-    database_url: str = "postgresql+asyncpg://postgres.nphhqhlfjuixeebqtmvb:aarsha7736740245%40@aws-1-ap-northeast-1.pooler.supabase.com:5432/postgres"
+    # Database — set DATABASE_URL in .env for PostgreSQL (Supabase)
+    database_url: str = "sqlite+aiosqlite:///./data/teleplay.db"
 
     # JWT — set JWT_SECRET for persistent sessions across restarts
     # Generate with: openssl rand -hex 32

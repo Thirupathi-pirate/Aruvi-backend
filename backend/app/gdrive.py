@@ -268,22 +268,27 @@ async def upload_streaming(
             client = clients[client_idx]
             sem = get_client_semaphore(client_idx)
             slot_end = min(slot_start + SLOT_SIZE, total)
-            try:
-                async with sem:
-                    async for offset, chunk in _byte_accurate_file_stream(
-                        client, msg, total, slot_start, slot_end
-                    ):
-                        os.pwrite(fd, chunk, offset)
-                        async with lock:
-                            downloaded += len(chunk)
-                            now = time.monotonic()
-                            if progress_callback and (now - last_ts >= 1 or downloaded >= total):
-                                await progress_callback(downloaded, total, "Downloading from Telegram")
-                                last_ts = now
-            except Exception as e:
-                async with lock:
-                    if dlerr is None:
-                        dlerr = e
+            for attempt in range(2):
+                try:
+                    async with sem:
+                        async for offset, chunk in _byte_accurate_file_stream(
+                            client, msg, total, slot_start, slot_end
+                        ):
+                            os.pwrite(fd, chunk, offset)
+                            async with lock:
+                                downloaded += len(chunk)
+                                now = time.monotonic()
+                                if progress_callback and (now - last_ts >= 1 or downloaded >= total):
+                                    await progress_callback(downloaded, total, "Downloading from Telegram")
+                                    last_ts = now
+                    break  # success
+                except Exception as e:
+                    if attempt == 0 and "AUTH_KEY_UNREGISTERED" in str(e):
+                        continue  # retry once with fresh session
+                    async with lock:
+                        if dlerr is None:
+                            dlerr = e
+                    break
 
         tasks = []
         for i, slot_start in enumerate(slot_starts):

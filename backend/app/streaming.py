@@ -433,7 +433,7 @@ async def _retry_chunk_with_alt_client(
                     ):
                         data.extend(part)
                 chunk_bytes = bytes(data)
-                if chunk_bytes and len(chunk_bytes) >= MIN_CHUNK_SIZE and not results[chunk_idx].done():
+                if chunk_bytes and not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
                     return
             except AuthKeyUnregistered:
@@ -449,7 +449,7 @@ async def _retry_chunk_with_alt_client(
                                 ):
                                     data.extend(part)
                             chunk_bytes = bytes(data)
-                            if chunk_bytes and len(chunk_bytes) >= MIN_CHUNK_SIZE and not results[chunk_idx].done():
+                            if chunk_bytes and not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
                                 return
                     except Exception:

@@ -11,7 +11,7 @@ from sqlalchemy import select
 
 from ..database import get_db
 from ..models import File, User
-from ..auth import get_current_user, get_current_user_opt, verify_token
+from ..auth import get_current_user, get_current_user_opt, verify_token, verify_token_payload
 
 from ..telegram import get_message_from_channel, tg_client, clients
 from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
@@ -52,7 +52,6 @@ async def streaming_debug(request: Request):
     auth = request.headers.get("Authorization", "")
     if auth != f"Bearer {settings.debug_password}":
         try:
-            from ..auth import verify_token
             token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""
             tid = verify_token(token) if token else None
             if not tid:
@@ -131,10 +130,14 @@ async def stream_file(
     if not current_user:
         token = request.query_params.get("token")
         if token:
-            tid = verify_token(token, token_type="download")
-            if tid:
+            payload = verify_token_payload(token, token_type="download")
+            if payload:
+                tid = int(payload["sub"])
+                token_version = payload.get("ver")
                 result = await db.execute(select(User).where(User.telegram_id == tid))
-                current_user = result.scalar_one_or_none()
+                user = result.scalar_one_or_none()
+                if user and (token_version is None or token_version >= user.auth_version):
+                    current_user = user
     if not current_user:
         raise HTTPException(status_code=401, detail="Not authenticated")
     # Get file from database

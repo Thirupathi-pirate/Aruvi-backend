@@ -68,7 +68,7 @@ def get_cpu() -> float:
         if usage is None:
             usage = _cgroup_v1_cpu_usage()
             if usage is not None:
-                usage //= 10  # v1 is in nanoseconds, v2 in microseconds
+                usage //= 1000  # v1 is in nanoseconds → microseconds
         if usage is None:
             return 0.0
 
@@ -221,12 +221,13 @@ def _sum_proc_rss() -> int:
         if own_cgroup is not None:
             try:
                 with open(f"/proc/{entry}/cgroup") as cf:
+                    pid_in_cgroup = False
                     for cline in cf:
                         if cline.startswith("0::"):
                             pid_cgroup = cline.strip()[3:]
-                            if pid_cgroup != own_cgroup:
-                                break
-                    else:
+                            pid_in_cgroup = (pid_cgroup == own_cgroup)
+                            break
+                    if not pid_in_cgroup:
                         continue
             except OSError:
                 continue

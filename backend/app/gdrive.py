@@ -196,7 +196,6 @@ async def ensure_aruvi_folder(service) -> str:
 
 
 GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
-UPLOAD_CONCURRENCY = 8
 CHUNK_SIZE = 1024 * 1024
 MAX_GDRIVE_FILE = 4 * 1024 * 1024 * 1024
 
@@ -256,58 +255,20 @@ async def upload_streaming(
                     if progress_callback:
                         await progress_callback(downloaded, total)
 
-            # ── Phase 2: Upload concurrently to Drive ──
-            queue: asyncio.Queue = asyncio.Queue(maxsize=UPLOAD_CONCURRENCY * 2)
-            all_responses: list[httpx.Response] = []
-            errors: list[Exception] = []
-
-            async def upload_worker():
-                while True:
-                    item = await queue.get()
-                    if item is None:
-                        queue.task_done()
-                        break
-                    start, end, chunk = item
-                    try:
-                        r = await _upload_block(client, upload_url, chunk, start, end, total)
-                        all_responses.append(r)
-                    except Exception as e:
-                        errors.append(e)
-                    finally:
-                        queue.task_done()
-
-            workers = [asyncio.create_task(upload_worker()) for _ in range(UPLOAD_CONCURRENCY)]
-
+            # ── Phase 2: Upload sequentially to Drive ──
             uploaded = 0
+            resp = None
             with open(tmp, "rb") as f:
                 while True:
-                    if errors:
-                        break
                     chunk = f.read(CHUNK_SIZE)
                     if not chunk:
                         break
                     start = uploaded
                     end = uploaded + len(chunk) - 1
-                    await queue.put((start, end, chunk))
+                    resp = await _upload_block(client, upload_url, chunk, start, end, total)
                     uploaded += len(chunk)
                     if progress_callback:
                         await progress_callback(uploaded, total)
-
-            for _ in range(UPLOAD_CONCURRENCY):
-                await queue.put(None)
-
-            await asyncio.gather(*workers)
-
-            if errors:
-                raise RuntimeError(f"Upload chunk failed: {errors[0]}")
-
-            resp = None
-            for r in all_responses:
-                if r.status_code in (200, 201):
-                    resp = r
-                    break
-            if resp is None:
-                raise RuntimeError("Upload did not complete — no 200/201 response from Drive")
 
         finally:
             tmp.unlink(missing_ok=True)

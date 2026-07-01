@@ -543,7 +543,7 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
 
     MAX_CHUNK = 1024 * 1024
     pos = offset_start
-    cache_key = None
+    total_read = 0
     while pos < offset_end:
         remaining = min(MAX_CHUNK, offset_end - pos)
         try:
@@ -574,13 +574,20 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
         if isinstance(r, raw.types.upload.File):
             chunk = r.bytes
             if not chunk:
+                logger.warning("BYTE_ACCURATE EOF at offset %d/%d (range %d-%d)", pos, offset_end, offset_start, offset_end)
                 break
             yield pos, chunk
             pos += len(chunk)
+            total_read += len(chunk)
         elif isinstance(r, raw.types.upload.FileCdnRedirect):
             raise NotImplementedError("CDN redirect not supported in byte-accurate stream")
         else:
+            logger.warning("BYTE_ACCURATE UNEXPECTED TYPE %s at offset %d", type(r).__name__, pos)
             break
+
+    if total_read < (offset_end - offset_start):
+        logger.warning("BYTE_ACCURATE SHORT range [%d, %d): read %d/%d bytes",
+                       offset_start, offset_end, total_read, offset_end - offset_start)
 
 
 async def parallel_stream_generator(
@@ -741,11 +748,14 @@ async def parallel_stream_generator(
                 try:
                     async with sem:
                         d = bytearray()
+                        prev_len = 0
                         async for _, part in _byte_accurate_file_stream(
                             cl, msg, msg_file_size or file_size,
                             chunk_byte_start, chunk_byte_end,
                         ):
                             d.extend(part)
+                            if len(d) - prev_len > 0:
+                                prev_len = len(d)
                     data = bytes(d)
                 except NotImplementedError:
                     logger.warning("FETCH ONE CDN bot %d chunk %d — cannot use byte-accurate", c_idx, chunk_offset)
@@ -753,6 +763,9 @@ async def parallel_stream_generator(
                 except Exception as e:
                     logger.warning("FETCH ONE FALLBACK FAIL bot %d chunk %d: %s", c_idx, chunk_offset, e)
                     return None
+                if len(data) < chunk_size:
+                    logger.warning("FETCH ONE BYTE-ACCURATE PARTIAL bot %d chunk %d: got %d/%d bytes",
+                                   c_idx, chunk_offset, len(data), chunk_size)
 
             if not data:
                 logger.warning("FETCH ONE EMPTY bot %d chunk %d in %.1fs", c_idx, chunk_offset, time.perf_counter() - t0)
@@ -934,7 +947,12 @@ async def parallel_stream_generator(
             else:
                 chunk_data = await results[chunk_idx]
                 video_cache.store(chunk_idx, chunk_data)
-            
+
+            if len(chunk_data) < chunk_size and chunk_data:
+                logger.warning("CHUNK SHORT chunk %d: got %d bytes (expected %d)", chunk_idx, len(chunk_data), chunk_size)
+            elif not chunk_data:
+                logger.warning("CHUNK EMPTY chunk %d", chunk_idx)
+
             bytes_yielded += len(chunk_data)
             if not first_chunk_logged:
                 elapsed = time.perf_counter() - stream_start

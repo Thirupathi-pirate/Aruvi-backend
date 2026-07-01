@@ -1,6 +1,7 @@
 """
-Google Drive integration — OAuth + stream-through upload.
-Never buffers the full file; streams Telegram chunks directly to Drive.
+Google Drive integration — OAuth + two-phase upload.
+Downloads the full file to NVMe temp via 13-bot parallel streaming,
+then uploads sequentially to Google Drive with 10MB chunks.
 """
 
 import asyncio
@@ -174,25 +175,37 @@ def build_service(token_dict: dict):
 
 async def ensure_aruvi_folder(service) -> str:
     """Return the ID of the 'Aruvi' folder in the user's Drive.
-    Creates it if it doesn't exist."""
+    Creates it if it doesn't exist.  Handles TOCTOU race on create."""
     q = (
         "name='Aruvi'"
         " and mimeType='application/vnd.google-apps.folder'"
         " and trashed=false"
     )
-    result = service.files().list(q=q, spaces="drive", fields="files(id)").execute()
-    files = result.get("files", [])
-    if files:
-        return files[0]["id"]
-    folder = (
-        service.files()
-        .create(
-            body={"name": "Aruvi", "mimeType": "application/vnd.google-apps.folder"},
-            fields="id",
+
+    def _find() -> str | None:
+        result = service.files().list(q=q, spaces="drive", fields="files(id)").execute()
+        files = result.get("files", [])
+        return files[0]["id"] if files else None
+
+    folder_id = _find()
+    if folder_id:
+        return folder_id
+
+    try:
+        folder = (
+            service.files()
+            .create(
+                body={"name": "Aruvi", "mimeType": "application/vnd.google-apps.folder"},
+                fields="id",
+            )
+            .execute()
         )
-        .execute()
-    )
-    return folder["id"]
+        return folder["id"]
+    except Exception:
+        folder_id = _find()
+        if folder_id:
+            return folder_id
+        raise
 
 
 GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
@@ -209,8 +222,8 @@ async def upload_streaming(
     folder_id: str,
     progress_callback=None,
 ) -> str:
-    """Download the full file to NVMe temp (via 13-bot parallel streaming),
-    then upload to Google Drive with 8 concurrent PUT workers.
+    """Download the full file to NVMe temp (via 13-bot parallel streaming,
+    then upload sequentially to Google Drive with 10MB chunks.
     Deletes the temp file after upload.
     """
     if file_size > MAX_GDRIVE_FILE:
@@ -248,21 +261,19 @@ async def upload_streaming(
 
         try:
             downloaded = 0
-            next_report = 5 * 1024 * 1024  # report every 5MB
+            last_report = 0
             with open(tmp, "wb") as f:
-                async for chunk in parallel_stream_generator(msg, offset=0, length=total):
+                async for chunk in parallel_stream_generator(msg, offset=0, length=total, concurrency=10):
                     f.write(chunk)
                     downloaded += len(chunk)
-                    if downloaded >= next_report:
-                        if progress_callback:
-                            await progress_callback(downloaded, total)
-                        next_report = downloaded + 5 * 1024 * 1024
-            # Final 100% report
-            if progress_callback:
-                await progress_callback(downloaded, total)
+                    now = time.monotonic()
+                    if progress_callback and (now - last_report >= 1 or downloaded >= total):
+                        await progress_callback(downloaded, total, "Downloading from Telegram")
+                        last_report = now
 
             # ── Phase 2: Upload sequentially to Drive ──
             uploaded = 0
+            last_report = 0
             resp = None
             with open(tmp, "rb") as f:
                 while True:
@@ -273,8 +284,10 @@ async def upload_streaming(
                     end = uploaded + len(chunk) - 1
                     resp = await _upload_block(client, upload_url, chunk, start, end, total)
                     uploaded += len(chunk)
-                    if progress_callback:
-                        await progress_callback(uploaded, total)
+                    now = time.monotonic()
+                    if progress_callback and (now - last_report >= 1 or uploaded >= total):
+                        await progress_callback(uploaded, total, "Uploading to Google Drive")
+                        last_report = now
 
         finally:
             tmp.unlink(missing_ok=True)

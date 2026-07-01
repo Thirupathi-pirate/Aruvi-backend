@@ -1404,12 +1404,12 @@ async def handle_callback(client, callback: CallbackQuery):
                 except Exception:
                     pass
 
-                async def _progress(uploaded, total):
+                async def _progress(uploaded, total, phase="Uploading to Google Drive"):
                     pct = uploaded * 100 // total if total else 0
                     bars = "▓" * (pct // 10) + "░" * (10 - pct // 10)
                     try:
                         await callback.message.edit(
-                            f"☁️ **Uploading to Google Drive...**\n\n"
+                            f"☁️ **{phase}...**\n\n"
                             f"📄 `{file_name}`\n"
                             f"📦 {format_size(file_size)}\n\n"
                             f"`[{bars}] {pct}%`\n"

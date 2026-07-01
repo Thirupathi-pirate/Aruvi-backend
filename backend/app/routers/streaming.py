@@ -172,7 +172,9 @@ async def stream_file(
     asyncio.create_task(prefetch_first_batch(tg_client, message, from_bytes))
 
     async def file_streamer():
-        """Generator that streams file chunks from Telegram MTProto."""
+        """Generator that streams file chunks from Telegram MTProto.
+        Streams to file_size on range requests so the player gets continuous
+        data from seek position and can find a keyframe to start decoding."""
         try:
             if range_header:
                 async with asyncio.timeout(300):
@@ -180,7 +182,7 @@ async def stream_file(
                         tg_client,
                         message,
                         from_bytes,
-                        until_bytes
+                        file_size
                     ):
                         yield chunk
             else:
@@ -188,7 +190,7 @@ async def stream_file(
                     tg_client,
                     message,
                     from_bytes,
-                    until_bytes
+                    file_size
                 ):
                     yield chunk
         except asyncio.TimeoutError:
@@ -343,7 +345,9 @@ async def stream_public_file(
     asyncio.create_task(prefetch_first_batch(tg_client, message, from_bytes))
 
     async def file_streamer():
-        """Generator that streams file chunks from Telegram MTProto."""
+        """Generator that streams file chunks from Telegram MTProto.
+        Streams to file_size on range requests so the player gets continuous
+        data from seek position and can find a keyframe to start decoding."""
         try:
             if range_header:
                 async with asyncio.timeout(300):
@@ -351,7 +355,7 @@ async def stream_public_file(
                         tg_client,
                         message,
                         from_bytes,
-                        until_bytes
+                        file_size
                     ):
                         yield chunk
             else:
@@ -359,7 +363,7 @@ async def stream_public_file(
                     tg_client,
                     message,
                     from_bytes,
-                    until_bytes
+                    file_size
                 ):
                     yield chunk
         except asyncio.TimeoutError:

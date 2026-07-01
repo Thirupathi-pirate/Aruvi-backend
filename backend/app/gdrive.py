@@ -283,7 +283,7 @@ async def upload_streaming(
                                     last_ts = now
                     break  # success
                 except Exception as e:
-                    if attempt == 0 and "AUTH_KEY_UNREGISTERED" in str(e):
+                    if attempt == 0 and ("AUTH_KEY_UNREGISTERED" in str(e) or "LIMIT_INVALID" in str(e)):
                         continue  # retry once with fresh session
                     async with lock:
                         if dlerr is None:

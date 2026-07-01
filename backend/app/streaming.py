@@ -525,11 +525,10 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
     pos = offset_start
     cache_key = None
     while pos < offset_end:
-        remaining = min(MAX_CHUNK, offset_end - pos)
         try:
             r = await session.invoke(
                 raw.functions.upload.GetFile(
-                    location=location, offset=pos, limit=remaining,
+                    location=location, offset=pos, limit=MAX_CHUNK,
                 ),
                 sleep_threshold=client.sleep_threshold,
             )
@@ -546,7 +545,7 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
             )
             r = await session.invoke(
                 raw.functions.upload.GetFile(
-                    location=location, offset=pos, limit=remaining,
+                    location=location, offset=pos, limit=MAX_CHUNK,
                 ),
                 sleep_threshold=client.sleep_threshold,
             )
@@ -559,6 +558,9 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
             chunk = r.bytes
             if not chunk:
                 break
+            # Trim to slot boundaries (server may return full 1MB)
+            if pos + len(chunk) > offset_end:
+                chunk = chunk[:offset_end - pos]
             yield pos, chunk
             pos += len(chunk)
         elif isinstance(r, raw.types.upload.FileCdnRedirect):

@@ -15,9 +15,11 @@ from ..auth import get_current_user, get_current_user_opt, verify_token
 
 from ..telegram import get_message_from_channel, tg_client, clients
 from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
+from ..config import get_settings
 from ..rate_limit import limiter
 
 logger = logging.getLogger(__name__)
+settings = get_settings()
 
 router = APIRouter(prefix="/stream", tags=["Streaming"])
 
@@ -48,7 +50,7 @@ def parse_range_header(range_header: str, file_size: int) -> tuple[int, int]:
 async def streaming_debug(request: Request):
     # Allow Bearer aarsha or valid admin JWT
     auth = request.headers.get("Authorization", "")
-    if auth != "Bearer aarsha":
+    if auth != f"Bearer {settings.debug_password}":
         try:
             from ..auth import verify_token
             token = auth.replace("Bearer ", "") if auth.startswith("Bearer ") else ""

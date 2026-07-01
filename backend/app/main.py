@@ -214,8 +214,11 @@ async def api_restart():
     os._exit(0)
 
 @app.get("/diag")
-async def diagnostic():
+async def diagnostic(request: Request):
     """Diagnostic endpoint (logs, client status, env info)."""
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {settings.debug_password}":
+        raise HTTPException(status_code=401, detail="Invalid debug token")
     from .telegram import tg_client, clients, get_diag_logs
     return {
         "client_connected": tg_client.is_connected if tg_client else False,

@@ -91,6 +91,9 @@ class Settings(BaseSettings):
     gdrive_client_secret: str = ""
     gdrive_redirect_uri: str = "https://REDACTED_DOMAIN/api/gdrive/auth/callback"
 
+    # Debug
+    debug_password: str = ""  # Set via .env: DEBUG_PASSWORD=yourpass
+
     # Web
     web_base_url: str = "https://REDACTED_DOMAIN"
 

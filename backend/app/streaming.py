@@ -13,6 +13,7 @@ from pathlib import Path
 
 BATCH_SIZE = 5  # 5MB per batch (5 × 1MB chunks)
 CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
+MIN_CHUNK_SIZE = 100 * 1024  # 100KB — smaller chunks trigger retry with fresh file ref
 DISK_CACHE_BASE = "data/chunks"
 DISK_CACHE_TTL = 3 * 3600  # 3 hours
 DISK_CACHE_MAX = 13 * 1024 * 1024 * 1024  # 13GB max
@@ -432,7 +433,7 @@ async def _retry_chunk_with_alt_client(
                     ):
                         data.extend(part)
                 chunk_bytes = bytes(data)
-                if chunk_bytes and not results[chunk_idx].done():
+                if chunk_bytes and len(chunk_bytes) >= MIN_CHUNK_SIZE and not results[chunk_idx].done():
                     results[chunk_idx].set_result(chunk_bytes)
                     return
             except AuthKeyUnregistered:
@@ -448,7 +449,7 @@ async def _retry_chunk_with_alt_client(
                                 ):
                                     data.extend(part)
                             chunk_bytes = bytes(data)
-                            if chunk_bytes and not results[chunk_idx].done():
+                            if chunk_bytes and len(chunk_bytes) >= MIN_CHUNK_SIZE and not results[chunk_idx].done():
                                 results[chunk_idx].set_result(chunk_bytes)
                                 return
                     except Exception:
@@ -582,11 +583,13 @@ async def parallel_stream_generator(
                         if current > batch_end:
                             break
                         data = bytes(part)
-                        if data:
+                        if data and (len(data) >= MIN_CHUNK_SIZE or current == end_chunk):
                             video_cache.store(current, data)
                             if not results[current].done():
                                 results[current].set_result(data)
                             current += 1
+                        elif data:
+                            logger.warning("BATCH TINY bot %d chunk %d in range %d-%d: %d bytes", c_idx, current, batch_start, batch_end, len(data))
                         else:
                             logger.warning("BATCH EMPTY bot %d chunk %d in range %d-%d", c_idx, current, batch_start, batch_end)
         except (asyncio.TimeoutError, ConnectionError, OSError, AuthKeyUnregistered) as e:
@@ -612,6 +615,9 @@ async def parallel_stream_generator(
             data = bytes(d)
             if not data:
                 logger.warning("FETCH ONE EMPTY bot %d chunk %d in %.1fs", c_idx, chunk_offset, time.perf_counter() - t0)
+                return None
+            if len(data) < MIN_CHUNK_SIZE and chunk_offset != end_chunk:
+                logger.warning("FETCH ONE TINY bot %d chunk %d: %d bytes in %.1fs", c_idx, chunk_offset, len(data), time.perf_counter() - t0)
                 return None
             video_cache.store(chunk_offset, data)
             elapsed = time.perf_counter() - t0
@@ -715,7 +721,7 @@ async def parallel_stream_generator(
                             async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
                                 d.extend(part)
                         data = bytes(d)
-                        if data:
+                        if data and (len(data) >= MIN_CHUNK_SIZE or chunk_offset == end_chunk):
                             video_cache.store(chunk_offset, data)
                             if not results[chunk_offset].done():
                                 results[chunk_offset].set_result(data)
@@ -732,7 +738,7 @@ async def parallel_stream_generator(
                                 async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
                                     d.extend(part)
                             data = bytes(d)
-                            if data:
+                            if data and (len(data) >= MIN_CHUNK_SIZE or chunk_offset == end_chunk):
                                 video_cache.store(chunk_offset, data)
                                 if not results[chunk_offset].done():
                                     results[chunk_offset].set_result(data)

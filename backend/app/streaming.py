@@ -500,29 +500,17 @@ async def parallel_stream_generator(
 
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
-        Times out after 30s to prevent a single slow bot from stalling playback.
-        On timeout, falls through to per-chunk retry across alt clients."""
+        Forward-caches each chunk immediately so concurrent streams
+        of the same file benefit before the yield loop."""
         t0 = time.perf_counter()
         current = batch_start
-
-        async def _run():
-            nonlocal current
-            async with sem:
-                async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
-                    data = bytes(part)
-                    video_cache.put(current, data)
-                    if not results[current].done():
-                        results[current].set_result(data)
-                    current += 1
-
-        try:
-            await asyncio.wait_for(_run(), timeout=30.0)
-        except asyncio.TimeoutError:
-            elapsed = time.perf_counter() - t0
-            logger.warning("Batch %d-%d timed out after %.1fs (bot %d, %d/%d chunks)",
-                          batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'),
-                          current - batch_start, batch_end - batch_start + 1)
-            return False
+        async with sem:
+            async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
+                data = bytes(part)
+                video_cache.put(current, data)
+                if not results[current].done():
+                    results[current].set_result(data)
+                current += 1
         elapsed = time.perf_counter() - t0
         if elapsed > 2.5:
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
@@ -666,17 +654,15 @@ async def parallel_stream_generator(
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
 
-    # Yield results in order. Workers pre-fill 300 chunks ahead naturally
-    # via the results dict. No artificial lookahead wait — the 2s timeout
+    # Yield results in order. No artificial lookahead wait — the 2s timeout
     # previously here caused per-chunk latency spikes when the prebuffer
-    # was partially drained. Chunks are batched to 2 MB sends for
-    # better HTTP throughput.
+    # was partially drained. Workers naturally stay ahead at 10x speed.
+    DEFAULT_YIELD_CHUNK = 1024 * 1024
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
     bytes_yielded = 0
     try:
-        send_buf = bytearray()
         for offset in range(total_chunks):
             chunk_idx = start_chunk + offset
 
@@ -689,22 +675,17 @@ async def parallel_stream_generator(
                 chunk_data = await results[chunk_idx]
                 video_cache.put(chunk_idx, chunk_data)
 
-            send_buf.extend(chunk_data)
             bytes_yielded += len(chunk_data)
             if not first_chunk_logged:
                 elapsed = time.perf_counter() - stream_start
                 logger.info("Chunk %d in %.1fs (cached=%s)", chunk_idx, elapsed, cached_data is not None)
                 first_chunk_logged = True
-            del results[chunk_idx]
-
-            # Flush send buffer in 2 MB batches for better HTTP throughput
-            if len(send_buf) >= 2 * 1024 * 1024 or offset == total_chunks - 1:
-                yield bytes(send_buf)
-                send_buf.clear()
+            yield chunk_data
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
                 if message_id in _forward_streams:
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
+            del results[chunk_idx]
     finally:
         _forward_streams.pop(message_id, None)
         # Schedule restart when no streams remain — frees page cache

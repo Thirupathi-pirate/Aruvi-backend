@@ -70,21 +70,6 @@ class ChunkCache:
         }
 
 
-class _NullCache:
-    """No-op cache — used when parallel_stream_generator(cache=False).
-    All methods are no-ops; get() always returns None.
-    """
-    def __init__(self):
-        self.position = 0
-    def put(self, *args, **kwargs): pass
-    def store(self, *args, **kwargs): pass
-    def get(self, key): return None
-    def set_position(self, pos): self.position = pos
-    def clear(self) -> int: return 0
-    @property
-    def info(self) -> dict:
-        return {"chunks": 0, "size_mb": 0, "hits": 0, "misses": 0, "evictions": 0}
-
 
 class CacheManager:
     """Manages per-video ChunkCache instances.
@@ -183,8 +168,6 @@ def get_forward_snapshot() -> list[dict]:
     return result
 
 
-logger = logging.getLogger(__name__)
-
 from pyrogram import Client
 from pyrogram import raw
 from pyrogram.file_id import FileId
@@ -232,12 +215,12 @@ async def _retry_chunk_with_alt_client(
 ):
     """Try fetching the chunk with a different client before giving up.
 
-    Retries up to 5 full cycles with exponential backoff (2^cycle).
+    Retries up to 2 full cycles with exponential backoff (2^cycle).
     Handles flood wait, auth expiry, and transient network errors.
     Only yields empty bytes as absolute last resort.
     """
     pool_size = len(clients)
-    max_cycles = 5
+    max_cycles = 2
     for cycle in range(max_cycles):
         for offset in range(1, pool_size):
             alt_c_idx = (failed_c_idx + offset) % pool_size
@@ -662,7 +645,10 @@ async def parallel_stream_generator(
             if offset >= PREBUFFER_CHUNKS:
                 lookahead_idx = chunk_idx + PREBUFFER_CHUNKS
                 if lookahead_idx <= end_chunk:
-                    await results[lookahead_idx]
+                    try:
+                        await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        pass
 
             # Try cache first (backward seek), fall back to fetch result
             cached_data = video_cache.get(chunk_idx)

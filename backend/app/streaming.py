@@ -149,6 +149,30 @@ def _dc_disk_size() -> int:
     return 0
 
 
+# ── Auto-restart when all streams finish ─────────────────────────────
+_pending_restart: asyncio.TimerHandle | None = None
+
+def _cancel_restart():
+    global _pending_restart
+    if _pending_restart is not None:
+        _pending_restart.cancel()
+        _pending_restart = None
+
+def _do_restart():
+    global _pending_restart
+    _pending_restart = None
+    import os, sys
+    logger.warning("No active streams — restarting to free memory")
+    sys.stdout.flush()
+    os._exit(0)
+
+def _schedule_restart(delay: float = 15.0):
+    global _pending_restart
+    _cancel_restart()
+    loop = asyncio.get_running_loop()
+    _pending_restart = loop.call_later(delay, _do_restart)
+
+
 def get_forward_snapshot() -> list[dict]:
     # Prune stale entries (>30s since last update)
     now = time.monotonic()
@@ -437,6 +461,9 @@ async def parallel_stream_generator(
         for i in range(total_chunks)
     }
 
+    # Cancel any pending auto-restart — a new stream just started
+    _cancel_restart()
+
     # Register forward stream for monitor (done futures = prebuffer depth)
     _forward_streams[message_id] = {"chat_id": chat_id, "results": results, "total_chunks": total_chunks, "updated_at": time.monotonic()}
 
@@ -473,17 +500,29 @@ async def parallel_stream_generator(
 
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
-        Forward-caches each chunk immediately so concurrent streams
-        of the same file benefit before the yield loop."""
+        Times out after 30s to prevent a single slow bot from stalling playback.
+        On timeout, falls through to per-chunk retry across alt clients."""
         t0 = time.perf_counter()
         current = batch_start
-        async with sem:
-            async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
-                data = bytes(part)
-                video_cache.put(current, data)
-                if not results[current].done():
-                    results[current].set_result(data)
-                current += 1
+
+        async def _run():
+            nonlocal current
+            async with sem:
+                async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
+                    data = bytes(part)
+                    video_cache.put(current, data)
+                    if not results[current].done():
+                        results[current].set_result(data)
+                    current += 1
+
+        try:
+            await asyncio.wait_for(_run(), timeout=30.0)
+        except asyncio.TimeoutError:
+            elapsed = time.perf_counter() - t0
+            logger.warning("Batch %d-%d timed out after %.1fs (bot %d, %d/%d chunks)",
+                          batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'),
+                          current - batch_start, batch_end - batch_start + 1)
+            return False
         elapsed = time.perf_counter() - t0
         if elapsed > 2.5:
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
@@ -628,11 +667,11 @@ async def parallel_stream_generator(
     ]
 
     # Yield results in order with windowed pre-buffer
-    # First 200 chunks yield immediately — zero startup delay.
-    # From chunk 200 onward, before yielding chunk N, we wait for chunk N+200
-    # to be ready. This maintains a 200MB lookahead cushion that absorbs
+    # First 300 chunks yield immediately — zero startup delay.
+    # From chunk 300 onward, before yielding chunk N, we wait for chunk N+300
+    # to be ready. This maintains a 300MB lookahead cushion that absorbs
     # Telegram latency spikes without pausing ExoPlayer.
-    PREBUFFER_CHUNKS = 200
+    PREBUFFER_CHUNKS = 300
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
@@ -641,7 +680,7 @@ async def parallel_stream_generator(
         for offset in range(total_chunks):
             chunk_idx = start_chunk + offset
 
-            # From chunk 500 onward, ensure lookahead is ready
+            # From chunk 300 onward, ensure lookahead is ready
             if offset >= PREBUFFER_CHUNKS:
                 lookahead_idx = chunk_idx + PREBUFFER_CHUNKS
                 if lookahead_idx <= end_chunk:
@@ -672,6 +711,9 @@ async def parallel_stream_generator(
             del results[chunk_idx]
     finally:
         _forward_streams.pop(message_id, None)
+        # Schedule restart when no streams remain — frees page cache
+        if not _forward_streams:
+            _schedule_restart()
         # Cache kept alive across seek requests — OOM guard in main.py handles eviction
         elapsed = time.perf_counter() - stream_start
         cinfo = video_cache.info

@@ -666,28 +666,19 @@ async def parallel_stream_generator(
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
 
-    # Yield results in order with windowed pre-buffer
-    # First 300 chunks yield immediately — zero startup delay.
-    # From chunk 300 onward, before yielding chunk N, we wait for chunk N+300
-    # to be ready. This maintains a 300MB lookahead cushion that absorbs
-    # Telegram latency spikes without pausing ExoPlayer.
-    PREBUFFER_CHUNKS = 300
+    # Yield results in order. Workers pre-fill 300 chunks ahead naturally
+    # via the results dict. No artificial lookahead wait — the 2s timeout
+    # previously here caused per-chunk latency spikes when the prebuffer
+    # was partially drained. Chunks are batched to 2 MB sends for
+    # better HTTP throughput.
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
     bytes_yielded = 0
     try:
+        send_buf = bytearray()
         for offset in range(total_chunks):
             chunk_idx = start_chunk + offset
-
-            # From chunk 300 onward, ensure lookahead is ready
-            if offset >= PREBUFFER_CHUNKS:
-                lookahead_idx = chunk_idx + PREBUFFER_CHUNKS
-                if lookahead_idx <= end_chunk:
-                    try:
-                        await asyncio.wait_for(results[lookahead_idx], timeout=2.0)
-                    except (asyncio.TimeoutError, asyncio.CancelledError):
-                        pass
 
             # Try cache first (backward seek), fall back to fetch result
             cached_data = video_cache.get(chunk_idx)
@@ -698,17 +689,22 @@ async def parallel_stream_generator(
                 chunk_data = await results[chunk_idx]
                 video_cache.put(chunk_idx, chunk_data)
 
+            send_buf.extend(chunk_data)
             bytes_yielded += len(chunk_data)
             if not first_chunk_logged:
                 elapsed = time.perf_counter() - stream_start
                 logger.info("Chunk %d in %.1fs (cached=%s)", chunk_idx, elapsed, cached_data is not None)
                 first_chunk_logged = True
-            yield chunk_data
+            del results[chunk_idx]
+
+            # Flush send buffer in 2 MB batches for better HTTP throughput
+            if len(send_buf) >= 2 * 1024 * 1024 or offset == total_chunks - 1:
+                yield bytes(send_buf)
+                send_buf.clear()
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
                 if message_id in _forward_streams:
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
-            del results[chunk_idx]
     finally:
         _forward_streams.pop(message_id, None)
         # Schedule restart when no streams remain — frees page cache

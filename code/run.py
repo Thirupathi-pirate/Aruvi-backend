@@ -57,10 +57,23 @@ except Exception:
     traceback.print_exc()
     sys.exit(1)
 
-# ── TelePlay ────────────────────────────────────────
+# ── Cloudflare cleanup (remove movie from tunnel + DNS) ──
+cf_token = _load_env("CLOUDFLARE_API_TOKEN")
+if cf_token:
+    os.environ["CLOUDFLARE_API_TOKEN"] = cf_token
+    try:
+        from app.cf_tunnel import cleanup as cf_cleanup
+        cf_cleanup()
+        print("CF cleanup done \u2014 movie removed from tunnel + DNS")
+    except Exception as e:
+        print(f"CF cleanup skipped (non-fatal): {e}")
+else:
+    print("CLOUDFLARE_API_TOKEN not in .env \u2014 CF cleanup skipped")
+
+# ── TelePlay (bind 0.0.0.0 for HidenCloud direct port) ──
 def run_teleplay():
     import uvicorn as uv
-    uv.run(app, host="127.0.0.1", port=7446, log_level="info")
+    uv.run(app, host="0.0.0.0", port=7446, log_level="info")
 
 threading.Thread(target=run_teleplay, daemon=True).start()
 
@@ -204,9 +217,9 @@ if tunnel_token:
     if os.path.exists(cf_bin):
         try:
             os.chmod(cf_bin, 0o755)
-            subprocess.Popen([cf_bin, "tunnel", "run", "--token", tunnel_token],
+            subprocess.Popen([cf_bin, "tunnel", "run", "--protocol", "http2", "--token", tunnel_token],
                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-            print("cloudflared tunnel started")
+            print("cloudflared tunnel started (HTTP/2)")
         except Exception as e:
             print(f"cloudflared start failed: {e}")
     else:

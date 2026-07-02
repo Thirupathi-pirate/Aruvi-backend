@@ -76,7 +76,7 @@ def find_tunnel(token, account_id, tunnel_name=None):
 
 
 def remove_movie_ingress(token, account_id, tunnel_id):
-    config = _get(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/config")
+    config = _get(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations")
     ingress = config.get("config", {}).get("ingress", [])
     if not ingress:
         logger.warning("No ingress rules in tunnel config")
@@ -90,7 +90,7 @@ def remove_movie_ingress(token, account_id, tunnel_id):
         logger.info("REDACTED_DOMAIN not found in tunnel ingress")
         return False
 
-    _put(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/config", config)
+    _put(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", config)
     logger.info("Removed REDACTED_DOMAIN from tunnel ingress")
     return True
 

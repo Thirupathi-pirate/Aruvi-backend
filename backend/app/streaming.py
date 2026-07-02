@@ -16,7 +16,7 @@ class ChunkCache:
     Key: chunk_idx -> bytes
     Max size: 200MB per video, evicts oldest entries when full.
     """
-    def __init__(self, max_bytes: int = 200 * 1024 * 1024):
+    def __init__(self, max_bytes: int = 100 * 1024 * 1024):
         self._data: dict[int, bytes] = {}
         self._order: list[int] = []
         self._size = 0
@@ -76,7 +76,7 @@ class CacheManager:
     Each (chat_id, message_id) pair gets its own 200MB FIFO cache,
     so concurrent streams don't evict each other's backward seek data.
     """
-    def __init__(self, per_video_max: int = 200 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 100 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
 
@@ -195,7 +195,7 @@ _client_semaphores = {}
 # Limit total concurrent streams to prevent OOM from prebuffers stacking.
 # Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
 # With LIMIT=10, max in-flight = 10 × 2 GB = 20 GB, within 3 GB cgroup with OOM guard.
-_stream_semaphore = asyncio.Semaphore(10)
+_stream_semaphore = asyncio.Semaphore(5)
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
     if client_index not in _client_semaphores:
@@ -628,11 +628,11 @@ async def parallel_stream_generator(
     ]
 
     # Yield results in order with windowed pre-buffer
-    # First 500 chunks yield immediately — zero startup delay.
-    # From chunk 500 onward, before yielding chunk N, we wait for chunk N+500
-    # to be ready. This maintains a 500MB lookahead cushion that absorbs
+    # First 200 chunks yield immediately — zero startup delay.
+    # From chunk 200 onward, before yielding chunk N, we wait for chunk N+200
+    # to be ready. This maintains a 200MB lookahead cushion that absorbs
     # Telegram latency spikes without pausing ExoPlayer.
-    PREBUFFER_CHUNKS = 500
+    PREBUFFER_CHUNKS = 200
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0

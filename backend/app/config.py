@@ -77,7 +77,7 @@ class Settings(BaseSettings):
     server_port: int = Field(24696, alias="SERVER_PORT")
 
     # Concurrency
-    telegram_client_concurrency: int = 5
+    telegram_client_concurrency: int = 10
 
     # Timeouts (Telegram-Drive inspired)
     telegram_connect_timeout: int = 30

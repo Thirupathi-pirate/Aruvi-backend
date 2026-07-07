@@ -721,11 +721,6 @@ async def parallel_stream_generator(
                 await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
             task_queue.task_done()
 
-    # Launch workers
-    worker_tasks = [
-        asyncio.create_task(worker(i)) for i in range(concurrency)
-    ]
-
     # ── Backpressure: cap in-flight resolved chunks ─────────────────
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
     # Must be > 14 * BATCH_SIZE (14 workers × 15 = 210) so workers
@@ -735,6 +730,11 @@ async def parallel_stream_generator(
     # 5 concurrent: 5 × 350 = 1.75 GB + 0.7 GB base = 2.45 GB (74% of 3.3 GB).
     WINDOW_CHUNKS = 350
     _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
+
+    # Launch workers
+    worker_tasks = [
+        asyncio.create_task(worker(i)) for i in range(concurrency)
+    ]
 
     # ── Yield smoothing: prebuffer before yielding ─────────────────────
     # Wait for MIN_PREBUFFER chunks before the first yield so workers

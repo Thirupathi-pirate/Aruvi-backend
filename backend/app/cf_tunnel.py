@@ -113,26 +113,43 @@ def add_movie_ingress(token, account_id, tunnel_id):
     return True
 
 
-def ensure_movie_dns(token, zone_id):
-    records = _get(token, f"/zones/{zone_id}/dns_records?name=REDACTED_DOMAIN")
+def _ensure_dns(token, zone_id, subdomain):
+    """Add CNAME for <subdomain>.aaruvi.space → tunnel if missing."""
+    fqdn = f"{subdomain}.aaruvi.space"
+    records = _get(token, f"/zones/{zone_id}/dns_records?name={fqdn}")
     if records:
         existing = records[0]
         if existing.get("type") == "CNAME" and existing.get("content") == TUNNEL_HOSTNAME:
-            logger.info("CNAME for REDACTED_DOMAIN already correct — skipping")
+            logger.info("CNAME for %s already correct — skipping", fqdn)
             return True
         if existing.get("type") == "A":
             _delete(token, f"/zones/{zone_id}/dns_records/{existing['id']}")
-            logger.info("Deleted stale A record for REDACTED_DOMAIN")
-
+            logger.info("Deleted stale A record for %s", fqdn)
     body = {
         "type": "CNAME",
-        "name": "movie",
+        "name": subdomain,
         "content": TUNNEL_HOSTNAME,
         "ttl": 120,
         "proxied": True,
     }
     _post(token, f"/zones/{zone_id}/dns_records", body)
-    logger.info("Created CNAME REDACTED_DOMAIN → %s", TUNNEL_HOSTNAME)
+    logger.info("Created CNAME %s → %s", fqdn, TUNNEL_HOSTNAME)
+    return True
+
+
+def _ensure_ingress(token, account_id, tunnel_id, hostname, service_url):
+    """Add a tunnel ingress rule if not already present."""
+    config = _get(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations")
+    ingress = config.get("config", {}).get("ingress", [])
+    catch_all = [r for r in ingress if r.get("hostname") is None]
+    others = [r for r in ingress if r.get("hostname") is not None]
+    if any(r.get("hostname") == hostname for r in others):
+        logger.info("%s already in tunnel ingress — skipping", hostname)
+        return False
+    others.append({"hostname": hostname, "service": service_url})
+    config["config"]["ingress"] = others + catch_all
+    _put(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", config)
+    logger.info("Added %s → %s to tunnel ingress", hostname, service_url)
     return True
 
 
@@ -146,8 +163,10 @@ def cleanup(token=None):
         aid = get_account_id(token)
         tid, tname = find_tunnel(token, aid)
         logger.info("Tunnel: %s (%s)", tname, tid)
-        add_movie_ingress(token, aid, tid)
+        _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:24696")
+        _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:7736")
         zid = get_zone_id(token)
-        ensure_movie_dns(token, zid)
+        _ensure_dns(token, zid, "movie")
+        _ensure_dns(token, zid, "test")
     except CFApiError as e:
         logger.error("CF setup failed: %s", e)

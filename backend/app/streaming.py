@@ -11,6 +11,35 @@ from typing import AsyncGenerator
 BATCH_SIZE = 15  # chunks per stream_media call (fewer RPCs = faster)
 
 
+def _get_media(message):
+    """Get the media object from a message, trying video, document, audio."""
+    return message.video or message.document or message.audio
+
+
+def _get_upload_location(file_id_obj, thumb_size=""):
+    """Create appropriate Input*FileLocation based on decoded file type."""
+    ft = file_id_obj.file_type
+    if ft == FileType.VIDEO:
+        return raw.types.InputVideoFileLocation(
+            id=file_id_obj.media_id,
+            access_hash=file_id_obj.access_hash,
+            file_reference=file_id_obj.file_reference,
+        )
+    elif ft in (FileType.AUDIO, FileType.VOICE):
+        return raw.types.InputAudioFileLocation(
+            id=file_id_obj.media_id,
+            access_hash=file_id_obj.access_hash,
+            file_reference=file_id_obj.file_reference,
+        )
+    else:
+        return raw.types.InputDocumentFileLocation(
+            id=file_id_obj.media_id,
+            access_hash=file_id_obj.access_hash,
+            file_reference=file_id_obj.file_reference,
+            thumb_size=thumb_size or "",
+        )
+
+
 class ChunkCache:
     """Per-video FIFO cache for already-yielded chunks (backward seek support).
     Key: chunk_idx -> bytes
@@ -192,7 +221,7 @@ def get_forward_snapshot() -> list[dict]:
 
 from pyrogram import Client
 from pyrogram import raw
-from pyrogram.file_id import FileId
+from pyrogram.file_id import FileId, FileType
 from pyrogram.errors import FileReferenceExpired, FileReferenceInvalid, AuthKeyUnregistered
 from pyrogram.session import Session, Auth
 
@@ -314,13 +343,11 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
     """Download byte range using direct upload.GetFile with correct byte-level offsets.
     Yields (byte_offset, chunk_data) tuples. Non-CDN files only.
     """
-    file_id_obj = FileId.decode(message.document.file_id)
-    location = raw.types.InputDocumentFileLocation(
-        id=file_id_obj.media_id,
-        access_hash=file_id_obj.access_hash,
-        file_reference=file_id_obj.file_reference,
-        thumb_size=file_id_obj.thumbnail_size or "",
-    )
+    media = _get_media(message)
+    if not media:
+        raise ValueError("Message has no streamable media")
+    file_id_obj = FileId.decode(media.file_id)
+    location = _get_upload_location(file_id_obj)
     dc_id = file_id_obj.dc_id
 
     session = client.media_sessions.get(dc_id)
@@ -367,15 +394,11 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
             )
         except (FileReferenceExpired, FileReferenceInvalid):
             refreshed = await client.get_messages(message.chat.id, message.id)
-            if not refreshed or not refreshed.document:
+            refreshed_media = _get_media(refreshed) if refreshed else None
+            if not refreshed_media:
                 break
-            file_id_obj = FileId.decode(refreshed.document.file_id)
-            location = raw.types.InputDocumentFileLocation(
-                id=file_id_obj.media_id,
-                access_hash=file_id_obj.access_hash,
-                file_reference=file_id_obj.file_reference,
-                thumb_size=file_id_obj.thumbnail_size or "",
-            )
+            file_id_obj = FileId.decode(refreshed_media.file_id)
+            location = _get_upload_location(file_id_obj)
             r = await session.invoke(
                 raw.functions.upload.GetFile(
                     location=location, offset=pos, limit=MAX_CHUNK, precise=True,
@@ -406,9 +429,10 @@ async def _byte_accurate_file_stream(client, message, file_size: int, offset_sta
 
 async def prefetch_first_batch(client, message, from_bytes: int = 0):
     """Fire-and-forget: start caching the first batch before the generator runs."""
-    if not message or not message.document:
+    media = _get_media(message) if message else None
+    if not media:
         return
-    file_size = message.document.file_size
+    file_size = media.file_size
     if from_bytes >= file_size:
         return
     chat_id = message.chat.id

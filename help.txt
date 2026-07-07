@@ -1,0 +1,50 @@
+# Aruvi Server — opencode Telegram Bot Setup
+
+## Server
+- HidenCloud container, ARM64, 3GB RAM
+- No SSH — access via REDACTED_DOMAIN terminal
+- Persistent files: ~/code/.env (secrets), ~/code/run.py (entrypoint), ~/code/node/ (Node.js if installed)
+- Repo cloned to ~/code/repo/backend/ on each restart
+- Auto-restart at 3:30 AM IST (os._exit(0) in run.py for fresh IP)
+
+## Current setup (code/run.py)
+- TelePlay (FastAPI) on :24696 via tunnel at REDACTED_DOMAIN
+- opencode web on :7444 (API + web UI) via tunnel at REDACTED_DOMAIN
+- cloudflared tunnel with TUNNEL_TOKEN
+- grinev/opencode-telegram-bot (Node.js) connects to opencode API
+- Node.js 22 ARM64 downloaded to ~/code/node/ if not in PATH
+
+## GDrive issue (fixed, committed)
+- _creds_from_dict scopes fix: d.get("scopes", SCOPES) -> d.get("scopes") or SCOPES
+- Prevents "Value after * must be an iterable, not NoneType" when stored token has "scopes": null
+
+## Remaining issue — Telegram bot not responding
+- opencode web is healthy at http://127.0.0.1:7444 (confirmed by curl)
+- Bot process starts (logs show "OpenCode Telegram Bot started") but doesn't respond
+- Bot logs hidden (stdout/stderr to DEVNULL in run.py)
+- Need to run manually to see errors: `cd ~/code && npx @grinev/opencode-telegram-bot@latest`
+
+## Env vars needed in ~/code/.env
+- OPENCODE_BOT_TOKEN=REDACTED_BOT_TOKEN
+- OPENCODE_BOT_USER_ID=REDACTED_USER_ID
+- CLOUDFLARE_API_TOKEN=...
+- TUNNEL_TOKEN=...
+- DATABASE_URL=...
+- DEBUG_PASSWORD=...
+- Other TelePlay env vars
+
+## CF Tunnel
+- Ingress rules managed by cf_tunnel.py (runs at startup)
+- REDACTED_DOMAIN -> :24696
+- REDACTED_DOMAIN -> :7444 (via tunnel config, not cf_tunnel.py)
+- REDACTED_DOMAIN -> :7444 (added to cf_tunnel.py)
+- Tunnel ID: REDACTED_TUNNEL
+
+## Key files
+- ~/code/run.py — entrypoint (starts everything)
+- ~/code/.env — secrets (gitignored)
+- ~/code/repo/backend/ — cloned repo
+- ~/code/repo/backend/app/main.py — FastAPI app, /api/restart endpoint
+- ~/code/repo/backend/app/cf_tunnel.py — CF API helpers
+- ~/code/repo/backend/code/run.py — same as ~/code/run.py (git source)
+- ~/.config/opencode-telegram-bot/.env — bot config (auto-generated)

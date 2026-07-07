@@ -35,6 +35,37 @@ def _get_file_attrs(message) -> tuple[int, str, str] | None:
     return None
 
 
+@router.get("/bandwidth")
+async def diag_bandwidth(
+    request: Request,
+    mb: int = Query(10, ge=1, le=100, description="Data size in MB"),
+    chunk: int = Query(65536, ge=4096, le=1048576, description="Chunk size in bytes"),
+):
+    t0 = time.perf_counter()
+    total_bytes = mb * 1024 * 1024
+    payload = b"\x00" * chunk
+
+    async def _gen():
+        remaining = total_bytes
+        while remaining > 0:
+            to_send = min(chunk, remaining)
+            yield payload[:to_send]
+            remaining -= to_send
+
+    elapsed = time.perf_counter() - t0
+    return StreamingResponse(
+        _gen(),
+        media_type="application/octet-stream",
+        headers={
+            "Content-Length": str(total_bytes),
+            "X-Test-Size-Bytes": str(total_bytes),
+            "X-Test-Chunk-Size": str(chunk),
+            "Server-Timing": f"setup;dur={int(elapsed*1000)}",
+            "Cache-Control": "no-store",
+        },
+    )
+
+
 @router.get("/ping")
 async def diag_ping(request: Request):
     _check_auth(request)

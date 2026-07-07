@@ -21,7 +21,7 @@ On each restart:
 3. `pip install` requirements
 4. Downloads `cloudflared-linux-arm64` and starts tunnel with `TUNNEL_TOKEN`
 5. Downloads `opencode-linux-arm64` (via urllib) and starts `opencode web --hostname 127.0.0.1 --port 7444`
-6. Threaded: TelePlay uvicorn on `127.0.0.1:7446`
+6. Threaded: TelePlay uvicorn on `0.0.0.0:24696` (HidenCloud public port)
 7. Threaded: Monitor (status.html proxy) on `127.0.0.1:7442`
 8. Blocks until 3:30 AM IST, then `os._exit(0)` for fresh IP
 
@@ -29,11 +29,13 @@ On each restart:
 
 | Domain | Target |
 |--------|--------|
-| `REDACTED_DOMAIN` | `localhost:7446` — TelePlay |
-| `REDACTED_DOMAIN` | `localhost:7444` — opencode Web UI |
-| `monitor.aaruvi.space` | `localhost:7442` — Status dashboard |
+| Domain | Target | Notes |
+|--------|--------|-------|
+| `REDACTED_DOMAIN` | `REDACTED_IP:24696` — TelePlay (direct) | HidenCloud public port, bypasses tunnel |
+| `REDACTED_DOMAIN` | `localhost:7444` — opencode Web UI | via tunnel |
+| `monitor.aaruvi.space` | `localhost:24696` — TelePlay (via tunnel proxy) | tunnel proxies /api/* + /health to TelePlay |
 
-All services bind `127.0.0.1` — only reachable through tunnel.
+TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696`.
 
 ## Architecture
 
@@ -53,7 +55,7 @@ All services bind `127.0.0.1` — only reachable through tunnel.
 ## Config (`config.py`)
 
 Reads from `.env` via pydantic-settings. Key fields:
-- `SERVER_PORT` alias (default `7446`)
+- `SERVER_PORT` alias (default `24696`)
 - `JWT_SECRET` — auto-generated if unset (sessions invalidate on restart)
 - `DATABASE_URL` defaults to `sqlite:///./data/teleplay.db`
 - `telegram_client_concurrency` = 5 (per-client semaphore)

@@ -109,7 +109,7 @@ else:
     print("CLOUDFLARE_API_TOKEN not set \u2014 CF cleanup skipped")
 
 # ── TelePlay (bind 0.0.0.0 for HidenCloud direct port) ──
-TELEPLAY_PORT = 7446
+TELEPLAY_PORT = 24696
 # If HidenCloud exposes a PORT env var (panel port allocation), log it
 hiden_port = os.environ.get("PORT") or os.environ.get("HIDEN_PORT")
 if hiden_port:
@@ -121,8 +121,8 @@ def run_teleplay():
 
 threading.Thread(target=run_teleplay, daemon=True).start()
 print(f"TelePlay listening on 0.0.0.0:{TELEPLAY_PORT}")
-print("To expose: go to HidenCloud dashboard > Ports > map port to internal 7446")
-print("Then create DNS: REDACTED_DOMAIN -> HidenCloud IP:PORT")
+print("TelePlay on HidenCloud public port 24696 — accessible at REDACTED_HOST:24696")
+print("Create DNS: REDACTED_DOMAIN -> REDACTED_IP (or CNAME REDACTED_HOST)")
 
 # ── Monitor ─────────────────────────────────────────
 STATIC_DIR = os.path.join(CODE_DIR, "app", "static")
@@ -164,7 +164,7 @@ def run_monitor():
                 body += msg.get("body", b"")
                 more = msg.get("more_body", False)
             qs = scope.get("query_string", b"")
-            url = f"http://localhost:7446{path}"
+            url = f"http://localhost:24696{path}"
             if qs:
                 url += "?" + qs.decode("utf-8", errors="replace")
             fwd_headers = {}
@@ -272,7 +272,7 @@ if os.path.exists(opencode_bin):
 # ── startup health check ────────────────────────────
 for i in range(30):
     try:
-        with urllib.request.urlopen("http://127.0.0.1:7446/health", timeout=2):
+        with urllib.request.urlopen(f"http://127.0.0.1:{TELEPLAY_PORT}/health", timeout=2):
             pass
         print("TelePlay is healthy")
         break

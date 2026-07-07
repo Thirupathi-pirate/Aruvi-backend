@@ -1,6 +1,6 @@
 """
 Cloudflare API helpers — remove REDACTED_DOMAIN from tunnel ingress + DNS
-at startup so port 7446 can be exposed directly via HidenCloud.
+at startup so port 24696 can be exposed directly via HidenCloud.
 """
 import os
 import logging

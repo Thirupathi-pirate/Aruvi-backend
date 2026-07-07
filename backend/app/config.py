@@ -74,7 +74,7 @@ class Settings(BaseSettings):
 
     # Server
     server_host: str = "0.0.0.0"
-    server_port: int = Field(7446, alias="SERVER_PORT")
+    server_port: int = Field(24696, alias="SERVER_PORT")
 
     # Concurrency
     telegram_client_concurrency: int = 5

@@ -269,6 +269,72 @@ if os.path.exists(opencode_bin):
     except Exception as e:
         print(f"opencode start failed: {e}")
 
+# ── opencode Telegram Bot (grinev) ──────────────────
+opencode_bot_token = _load_env("OPENCODE_BOT_TOKEN")
+opencode_bot_user_id = _load_env("OPENCODE_BOT_USER_ID")
+if opencode_bot_token and opencode_bot_user_id:
+    node_bin = shutil.which("node")
+    npx_bin = shutil.which("npx")
+    if not node_bin:
+        node_dir = os.path.join(BASE, "node")
+        node_archive = os.path.join(BASE, "node.tar.gz")
+        node_bin = os.path.join(node_dir, "bin", "node")
+        npx_bin = os.path.join(node_dir, "bin", "npx")
+        if not os.path.exists(node_bin):
+            print("Downloading Node.js for ARM64...")
+            try:
+                with urllib.request.urlopen(
+                    "https://nodejs.org/dist/v22.14.0/node-v22.14.0-linux-arm64.tar.gz",
+                    timeout=120,
+                ) as resp:
+                    with open(node_archive, "wb") as f:
+                        while True:
+                            chunk = resp.read(65536)
+                            if not chunk:
+                                break
+                            f.write(chunk)
+                os.makedirs(node_dir, exist_ok=True)
+                with tarfile.open(node_archive, "r:gz") as tar:
+                    for m in tar.getmembers():
+                        name = m.name.removeprefix("node-v22.14.0-linux-arm64/")
+                        if not name:
+                            continue
+                        dest = os.path.join(node_dir, name)
+                        if m.isdir():
+                            os.makedirs(dest, exist_ok=True)
+                        else:
+                            with open(dest, "wb") as f:
+                                f.write(tar.extractfile(m).read())
+                            os.chmod(dest, 0o755 if name.startswith("bin/") else 0o644)
+                os.remove(node_archive)
+                print("  Node.js installed")
+            except Exception as e:
+                print(f"  Node.js download failed: {e}")
+                node_bin, npx_bin = None, None
+    if node_bin and os.path.exists(node_bin):
+        bot_config_dir = os.path.expanduser("~/.config/opencode-telegram-bot")
+        os.makedirs(bot_config_dir, exist_ok=True)
+        with open(os.path.join(bot_config_dir, ".env"), "w") as f:
+            f.write(f"TELEGRAM_BOT_TOKEN={opencode_bot_token}\n")
+            f.write(f"TELEGRAM_ALLOWED_USER_ID={opencode_bot_user_id}\n")
+            f.write("OPENCODE_API_URL=http://127.0.0.1:7444\n")
+            f.write("OPENCODE_MODEL_PROVIDER=opencode\n")
+            f.write("OPENCODE_MODEL_ID=big-pickle\n")
+        env = os.environ.copy()
+        env["PATH"] = os.path.dirname(node_bin) + ":" + env.get("PATH", "")
+        try:
+            subprocess.Popen(
+                [npx_bin, "@grinev/opencode-telegram-bot@latest"],
+                env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            print("OpenCode Telegram Bot started")
+        except Exception as e:
+            print(f"OpenCode Telegram Bot failed: {e}")
+    else:
+        print("Node.js not available — OpenCode Telegram Bot skipped")
+else:
+    print("OPENCODE_BOT_TOKEN / OPENCODE_BOT_USER_ID not set — OpenCode Telegram Bot skipped")
+
 # ── startup health check ────────────────────────────
 for i in range(30):
     try:

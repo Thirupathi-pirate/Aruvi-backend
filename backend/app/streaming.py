@@ -161,10 +161,8 @@ def _cancel_restart():
 def _do_restart():
     global _pending_restart
     _pending_restart = None
-    import os, sys
-    logger.warning("No active streams — restarting to free memory")
-    sys.stdout.flush()
-    os._exit(0)
+    freed = _cache_manager.clear_all()
+    logger.warning("No active streams — cleared %.1f MB from cache", freed / 1024 / 1024)
 
 def _schedule_restart(delay: float = 15.0):
     global _pending_restart

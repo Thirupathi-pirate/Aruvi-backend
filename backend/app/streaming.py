@@ -2,6 +2,7 @@
 Custom streaming utilities for Telegram media files.
 Multi-client parallel streaming for maximum download speed.
 """
+import ctypes
 import gc
 import asyncio
 import re
@@ -10,6 +11,18 @@ import logging
 from typing import AsyncGenerator
 
 BATCH_SIZE = 15  # chunks per stream_media call (fewer RPCs = faster)
+
+
+def _trim_memory():
+    """Force Python's allocator to return free pages to the OS.
+    After large streams, pymalloc arenas hold freed memory that
+    isn't reclaimed. This calls gc.collect() + malloc_trim()."""
+    gc.collect()
+    try:
+        libc = ctypes.CDLL("libc.so.6")
+        libc.malloc_trim(0)
+    except Exception:
+        pass
 
 
 def _get_media(message):
@@ -193,8 +206,8 @@ def _do_restart():
     _pending_restart = None
     _forward_streams.clear()
     freed = _cache_manager.clear_all()
-    gc.collect()
-    logger.warning("No active streams — cleared %.1f MB from cache, GC collected", freed / 1024 / 1024)
+    _trim_memory()
+    logger.warning("No active streams — cleared %.1f MB from cache, memory trimmed", freed / 1024 / 1024)
 
 def _schedule_restart(delay: float = 15.0):
     global _pending_restart
@@ -730,9 +743,9 @@ async def parallel_stream_generator(
     # Must be > 14 * BATCH_SIZE (14 workers × 15 = 210) so workers
     # can complete their first batch round without stalling. Higher
     # values absorb slow-batch jitter (10-20s) without cascading stalls.
-    # 700 MB window + 100 MB cache + 700 MB app base ≈ 1.5 GB peak,
-    # leaving 1.8 GB headroom on 3.3 GB RAM server.
-    WINDOW_CHUNKS = 700
+    # 350 MB window + 100 MB cache + 700 MB app base ≈ 1.15 GB peak per stream.
+    # 5 concurrent: 5 × 350 = 1.75 GB + 0.7 GB base = 2.45 GB (74% of 3.3 GB).
+    WINDOW_CHUNKS = 350
     _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
 
     # ── Yield smoothing: prebuffer before yielding ─────────────────────
@@ -786,7 +799,12 @@ async def parallel_stream_generator(
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
             del results[chunk_idx]
     finally:
+        # Break all references to chunk data before releasing forward stream
+        results.clear()
+        for w in worker_tasks:
+            w.cancel()
         _forward_streams.pop(message_id, None)
+        _trim_memory()
         # Schedule restart when no streams remain — frees page cache
         if not _forward_streams:
             _schedule_restart()
@@ -795,8 +813,6 @@ async def parallel_stream_generator(
         cinfo = video_cache.info
         logger.info("Done: %d ch, %.1f MB, %.1fs", total_chunks, bytes_yielded / 1024 / 1024, elapsed)
         logger.info("Cache hits/evicts: %d/%d", cinfo["hits"], cinfo["evictions"])
-        for w in worker_tasks:
-            w.cancel()
 
 
 async def stream_file(

@@ -1,6 +1,7 @@
 """
 FastAPI main application with Telegram MTProto client lifecycle.
 """
+import ctypes
 import gc
 import asyncio
 import logging
@@ -60,14 +61,14 @@ async def _oom_guard_30s():
                 active = {(info["chat_id"], mid) for mid, info in list(fs.items())}
                 freed = cm.clear_all(exclude_keys=active)
                 kept = len(active)
-                n = gc.collect()
-                logger.warning("OOM guard: cleared %.1f MB from cache (%d active), GC freed %d objects",
-                               freed / 1024 / 1024, kept, n)
-                # Try to drop OS page cache (may fail in unprivileged container)
+                gc.collect()
                 try:
-                    os.system("sync; echo 3 > /proc/sys/vm/drop_caches 2>/dev/null")
+                    libc = ctypes.CDLL("libc.so.6")
+                    libc.malloc_trim(0)
                 except Exception:
                     pass
+                logger.warning("OOM guard: freed %.1f MB cache, trimmed heap (%d active)",
+                               freed / 1024 / 1024, kept)
         except Exception:
             pass
 

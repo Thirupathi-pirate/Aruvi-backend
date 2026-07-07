@@ -11,6 +11,44 @@ if not os.path.exists(ENV_FILE):
     if os.path.exists(parent_env):
         ENV_FILE = os.path.abspath(parent_env)
 
+
+def _load_env(key):
+    if not os.path.exists(ENV_FILE):
+        return None
+    with open(ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                v = v.strip()
+                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                    v = v[1:-1]
+                return v
+    return None
+
+
+def _export_env():
+    """Load all vars from .env into os.environ (skip existing)."""
+    if not os.path.exists(ENV_FILE):
+        return
+    with open(ENV_FILE) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            k = k.strip()
+            v = v.strip()
+            if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
+                v = v[1:-1]
+            if k not in os.environ:
+                os.environ[k] = v
+
+
+# Export .env into environment so cf_tunnel etc can use os.environ.get()
+_export_env()
 os.chdir(BASE)
 
 # ── fresh clone every time ─────────────────────────
@@ -156,22 +194,6 @@ def run_monitor():
 threading.Thread(target=run_monitor, daemon=True).start()
 
 # ── helpers ─────────────────────────────────────────
-def _load_env(key):
-    if not os.path.exists(ENV_FILE):
-        return None
-    with open(ENV_FILE) as f:
-        for line in f:
-            line = line.strip()
-            if not line or line.startswith("#") or "=" not in line:
-                continue
-            k, _, v = line.partition("=")
-            if k.strip() == key:
-                v = v.strip()
-                if len(v) >= 2 and v[0] == v[-1] and v[0] in ('"', "'"):
-                    v = v[1:-1]
-                return v
-    return None
-
 def _download(url, dest):
     if os.path.exists(dest):
         os.chmod(dest, 0o755)

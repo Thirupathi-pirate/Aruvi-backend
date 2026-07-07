@@ -501,7 +501,9 @@ async def parallel_stream_generator(
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
         Forward-caches each chunk immediately so concurrent streams
-        of the same file benefit before the yield loop."""
+        of the same file benefit before the yield loop.
+        Acquires a backpressure permit per chunk to cap in-flight
+        resolved-but-unyielded data — prevents OOM for huge files."""
         t0 = time.perf_counter()
         current = batch_start
         async with sem:
@@ -510,6 +512,8 @@ async def parallel_stream_generator(
                 video_cache.put(current, data)
                 if not results[current].done():
                     results[current].set_result(data)
+                # Backpressure: wait until yield loop frees a slot
+                await _backpressure.acquire()
                 current += 1
         elapsed = time.perf_counter() - t0
         if elapsed > 2.5:
@@ -654,13 +658,22 @@ async def parallel_stream_generator(
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
 
+    # ── Backpressure: cap in-flight resolved chunks ─────────────────
+    # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
+    # Prevents OOM for huge files (>3 GB) where all 3584+ futures
+    # would otherwise fill RAM before the tunnel can drain them.
+    # 200 MB window + 100 MB cache + 700 MB app base ≈ 1 GB peak,
+    # well within the 1.8 GB headroom on 3.3 GB RAM server.
+    WINDOW_CHUNKS = 200
+    _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
+
     # ── Yield smoothing: prebuffer before yielding ─────────────────────
     # Wait for MIN_PREBUFFER chunks before the first yield so workers
     # build a pipeline ahead of the HTTP response stream. This absorbs
     # batch-to-batch jitter (flood waits, slow DC) without client-side
-    # rebuffering. At ~4.4 chunks/s throughput and 14 workers, the first
-    # 20 chunks complete in ~2-3s while workers also start 2nd+ batches.
-    MIN_PREBUFFER = 20
+    # rebuffering. Set low (5) to avoid 10s TTFB from Telegram DC init;
+    # 5 chunks arrive progressively within the first batch fetch (~3s).
+    MIN_PREBUFFER = 5
     prebuffer_n = min(MIN_PREBUFFER, total_chunks)
     if prebuffer_n > 1:
         prebuffer_futs = [
@@ -697,6 +710,8 @@ async def parallel_stream_generator(
                 logger.info("Chunk %d in %.1fs (cached=%s)", chunk_idx, elapsed, cached_data is not None)
                 first_chunk_logged = True
             yield chunk_data
+            # Release backpressure permit — next in-flight chunk may resolve
+            _backpressure.release()
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
                 if message_id in _forward_streams:

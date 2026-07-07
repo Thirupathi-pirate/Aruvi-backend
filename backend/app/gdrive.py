@@ -208,8 +208,11 @@ async def ensure_aruvi_folder(service) -> str:
 
 
 GDRIVE_UPLOAD_DIR = Path("data/gdrive_upload")
-CHUNK_SIZE = 20 * 1024 * 1024
+CHUNK_SIZE = 10 * 1024 * 1024
 MAX_GDRIVE_FILE = 4 * 1024 * 1024 * 1024
+
+# Limit concurrent 1MB slot downloads to prevent OOM (30 × 1MB = 30MB in-flight)
+_GDRIVE_DOWNLOAD_SEM = asyncio.Semaphore(30)
 
 
 async def upload_streaming(
@@ -265,31 +268,32 @@ async def upload_streaming(
             nonlocal downloaded, last_ts, dlerr
             if dlerr:
                 return
-            client = clients[client_idx]
-            sem = get_client_semaphore(client_idx)
-            slot_end = min(slot_start + SLOT_SIZE, total)
-            for attempt in range(2):
-                try:
-                    async with sem:
-                        async for offset, chunk in _byte_accurate_file_stream(
-                            client, msg, total, slot_start, slot_end
-                        ):
-                            os.pwrite(fd, chunk, offset)
-                            os.posix_fadvise(fd, offset, len(chunk), os.POSIX_FADV_DONTNEED)
-                            async with lock:
-                                downloaded += len(chunk)
-                                now = time.monotonic()
-                                if progress_callback and (now - last_ts >= 1 or downloaded >= total):
-                                    await progress_callback(downloaded, total, "Downloading from Telegram")
-                                    last_ts = now
-                    break  # success
-                except Exception as e:
-                    if attempt == 0 and ("AUTH_KEY_UNREGISTERED" in str(e) or "LIMIT_INVALID" in str(e)):
-                        continue  # retry once with fresh session
-                    async with lock:
-                        if dlerr is None:
-                            dlerr = e
-                    break
+            async with _GDRIVE_DOWNLOAD_SEM:
+                client = clients[client_idx]
+                sem = get_client_semaphore(client_idx)
+                slot_end = min(slot_start + SLOT_SIZE, total)
+                for attempt in range(2):
+                    try:
+                        async with sem:
+                            async for offset, chunk in _byte_accurate_file_stream(
+                                client, msg, total, slot_start, slot_end
+                            ):
+                                os.pwrite(fd, chunk, offset)
+                                os.posix_fadvise(fd, offset, len(chunk), os.POSIX_FADV_DONTNEED)
+                                async with lock:
+                                    downloaded += len(chunk)
+                                    now = time.monotonic()
+                                    if progress_callback and (now - last_ts >= 1 or downloaded >= total):
+                                        await progress_callback(downloaded, total, "Downloading from Telegram")
+                                        last_ts = now
+                        break  # success
+                    except Exception as e:
+                        if attempt == 0 and ("AUTH_KEY_UNREGISTERED" in str(e) or "LIMIT_INVALID" in str(e)):
+                            continue  # retry once with fresh session
+                        async with lock:
+                            if dlerr is None:
+                                dlerr = e
+                        break
 
         tasks = []
         for i, slot_start in enumerate(slot_starts):

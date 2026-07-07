@@ -144,7 +144,7 @@ def _creds_from_dict(d: dict) -> UserCredentials:
         token_uri="https://oauth2.googleapis.com/token",
         client_id=settings.gdrive_client_id,
         client_secret=settings.gdrive_client_secret,
-        scopes=d.get("scopes", SCOPES),
+        scopes=d.get("scopes") or SCOPES,
         expiry=expiry,
     )
 

@@ -19,7 +19,7 @@ from .rate_limit import limiter
 from .telegram import start_telegram_client, stop_telegram_client
 from .status import get_status, attach_ring_handler, clear_logs, _discover_cgroup_memory
 
-from .routers import files_router, folders_router, streaming_router, auth_router, tv_router, admin_router, gdrive_router, legal_router
+from .routers import files_router, folders_router, streaming_router, auth_router, tv_router, admin_router, gdrive_router, legal_router, diagnostic_router
 
 # Import bot to register handlers
 from . import bot  # noqa
@@ -181,6 +181,7 @@ app.include_router(tv_router, prefix="/api")
 app.include_router(admin_router, prefix="/api")
 app.include_router(gdrive_router, prefix="/api")
 app.include_router(legal_router)
+app.include_router(diagnostic_router, prefix="/api")
 
 
 

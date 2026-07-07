@@ -116,6 +116,52 @@ def delete_movie_dns(token):
     return True
 
 
+def create_movie_dns(token=None, ip="REDACTED_IP"):
+    token = token or os.environ.get("CLOUDFLARE_API_TOKEN")
+    if not token:
+        logger.warning("CLOUDFLARE_API_TOKEN not set — skipping DNS create")
+        return False
+
+    try:
+        zones = _get(token, "/zones?name=aaruvi.space")
+        if not zones:
+            logger.info("Zone 'aaruvi.space' not found — DNS skip")
+            return False
+        zone_id = zones[0]["id"]
+
+        records = _get(token, f"/zones/{zone_id}/dns_records?name=REDACTED_DOMAIN")
+        if records:
+            logger.info("DNS record for REDACTED_DOMAIN already exists — skipping")
+            return True
+
+        body = {
+            "type": "A",
+            "name": "movie",
+            "content": ip,
+            "ttl": 120,
+            "proxied": False,
+        }
+        with httpx.Client() as c:
+            r = c.post(
+                f"{API_BASE}/zones/{zone_id}/dns_records",
+                headers=_headers(token),
+                json=body,
+                timeout=15,
+            )
+            if r.status_code != 200:
+                logger.error("DNS create failed: %s %s", r.status_code, r.text[:200])
+                return False
+            data = r.json()
+            if not data.get("success"):
+                logger.error("DNS create API error: %s", data.get("errors", []))
+                return False
+            logger.info("Created A record REDACTED_DOMAIN → %s", ip)
+            return True
+    except Exception as e:
+        logger.error("DNS create failed: %s", e)
+        return False
+
+
 def cleanup(token=None):
     token = token or os.environ.get("CLOUDFLARE_API_TOKEN")
     if not token:

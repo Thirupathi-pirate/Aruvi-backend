@@ -1,0 +1,202 @@
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>TelePlay Diagnostic Player</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { font: 14px/1.4 system-ui, -apple-system, sans-serif; background: #111; color: #eee; padding: 16px; }
+  h1 { font-size: 18px; margin-bottom: 12px; color: #0af; }
+  .row { display: flex; gap: 8px; margin-bottom: 12px; flex-wrap: wrap; align-items: center; }
+  .row label { color: #888; }
+  .row input { flex: 1; min-width: 100px; padding: 6px 10px; background: #222; border: 1px solid #444; color: #eee; border-radius: 4px; font-size: 13px; }
+  .row input:focus { outline: none; border-color: #0af; }
+  button { padding: 8px 20px; background: #0af; color: #000; border: none; border-radius: 4px; font-weight: 600; cursor: pointer; font-size: 13px; }
+  button:hover { background: #3cf; }
+  button:disabled { opacity: .5; cursor: default; }
+  video { width: 100%; max-width: 800px; display: block; background: #000; border-radius: 4px; margin-bottom: 12px; }
+  #diag { background: #1a1a1a; border-radius: 4px; padding: 12px; font-family: 'SF Mono', 'Fira Code', monospace; font-size: 12px; display: grid; grid-template-columns: 1fr 1fr; gap: 4px 16px; max-width: 800px; }
+  #diag .label { color: #888; }
+  #diag .value { color: #0f0; word-break: break-all; }
+  #diag .value.bad { color: #f55; }
+  #diag .warn { color: #fa0; }
+  .error { color: #f55; padding: 12px; background: #300; border-radius: 4px; max-width: 800px; }
+  #speed { font-size: 24px; font-weight: 700; }
+  .note { color: #666; font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+
+<h1>TelePlay Diagnostic Player</h1>
+
+<div class="row">
+  <label>Chat ID:</label>
+  <input id="chatInput" placeholder="e.g. -1001234567890 (leave empty for storage channel)">
+  <label>Msg ID:</label>
+  <input id="msgInput" placeholder="required">
+  <label>Auth:</label>
+  <input id="authInput" type="password" placeholder="DEBUG_PASSWORD" value="aarsha">
+  <button id="loadBtn">Load & Play</button>
+</div>
+
+<video id="player" controls preload="auto" muted></video>
+
+<div id="diag">
+  <span class="label">Status:</span><span class="value" id="dStatus">—</span>
+  <span class="label">Speed:</span><span class="value" id="dSpeed">—</span>
+  <span class="label">Downloaded:</span><span class="value" id="dDownloaded">—</span>
+  <span class="label">Buffered:</span><span class="value" id="dBuffered">—</span>
+  <span class="label">TTFB:</span><span class="value" id="dTtfb">—</span>
+  <span class="label">File Size:</span><span class="value" id="dFileSize">—</span>
+  <span class="label">Content-Type:</span><span class="value" id="dContentType">—</span>
+  <span class="label">Msg ID:</span><span class="value" id="dMsgId">—</span>
+  <span class="label">Duration:</span><span class="value" id="dDuration">—</span>
+  <span class="label">Current Time:</span><span class="value" id="dCurrentTime">—</span>
+</div>
+
+<div class="note">
+  Opens video directly from Telegram through TelePlay's streaming pipeline.
+  Missing frames, buffering events, or high TTFB indicate pipeline issues.
+</div>
+
+<script>
+const chatIn = document.getElementById('chatInput');
+const msgIn = document.getElementById('msgInput');
+const authIn = document.getElementById('authInput');
+const loadBtn = document.getElementById('loadBtn');
+const player = document.getElementById('player');
+
+function el(id) { return document.getElementById(id); }
+
+function setDiag(label, value, cls) {
+  const v = el('d' + label);
+  if (v) { v.textContent = value; v.className = 'value' + (cls ? ' ' + cls : ''); }
+}
+
+function formatBytes(b) {
+  if (!b || b === 0) return '0 B';
+  const u = ['B','KB','MB','GB'];
+  let i = 0;
+  let v = b;
+  while (v >= 1024 && i < u.length - 1) { v /= 1024; i++; }
+  return v.toFixed(i > 0 ? 1 : 0) + ' ' + u[i];
+}
+
+function formatSpeed(bps) {
+  if (!bps || bps <= 0) return '—';
+  if (bps >= 1000000) return (bps / 1000000).toFixed(1) + ' Mbps';
+  if (bps >= 1000) return (bps / 1000).toFixed(1) + ' Kbps';
+  return bps.toFixed(0) + ' bps';
+}
+
+let diagUrl = '';
+let diagFileSize = 0;
+let diagStart = 0;
+let diagLastBytes = 0;
+let diagInterval = null;
+
+async function loadVideo() {
+  const chat = chatIn.value.trim();
+  const msg = msgIn.value.trim();
+  const auth = authIn.value.trim();
+
+  if (!msg) { setDiag('Status', 'Enter msg ID', 'bad'); return; }
+
+  let url = '/api/diag/stream?msg=' + encodeURIComponent(msg);
+  if (chat) url += '&chat=' + encodeURIComponent(chat);
+
+  setDiag('Status', 'Loading...', 'warn');
+  loadBtn.disabled = true;
+
+  try {
+    const resp = await fetch(url, {
+      method: 'GET',
+      headers: { 'Authorization': 'Bearer ' + auth, 'Range': 'bytes=0-' },
+    });
+
+    diagFileSize = parseInt(resp.headers.get('X-Diag-File-Size') || '0', 10);
+    const ttfb = resp.headers.get('X-Diag-Ttfb-Ms') || '—';
+    const ct = resp.headers.get('X-Diag-Content-Type') || '—';
+    const mid = resp.headers.get('X-Diag-Msg-Id') || '—';
+    const cid = resp.headers.get('X-Diag-Chat-Id') || '—';
+
+    setDiag('Ttfb', ttfb + ' ms');
+    setDiag('FileSize', formatBytes(diagFileSize));
+    setDiag('ContentType', ct);
+    setDiag('MsgId', mid + ' (chat: ' + cid + ')');
+    setDiag('Status', 'OK — streaming', '');
+
+    if (!resp.ok) {
+      const text = await resp.text();
+      setDiag('Status', resp.status + ' ' + text, 'bad');
+      loadBtn.disabled = false;
+      return;
+    }
+
+    diagUrl = url;
+    diagStart = Date.now();
+    diagLastBytes = 0;
+
+    player.src = url + '&_t=' + Date.now();
+    player.load();
+    player.play().catch(() => {});
+
+    if (diagInterval) clearInterval(diagInterval);
+    diagInterval = setInterval(updateDiag, 500);
+
+  } catch (e) {
+    setDiag('Status', 'Error: ' + e.message, 'bad');
+    loadBtn.disabled = false;
+  }
+}
+
+function updateDiag() {
+  if (!player.src) return;
+
+  const buf = player.buffered;
+  let bufEnd = 0;
+  if (buf.length > 0) bufEnd = buf.end(buf.length - 1);
+
+  setDiag('Buffered', (bufEnd - player.currentTime).toFixed(1) + 's / ' + (bufEnd).toFixed(1) + 's');
+  setDiag('Duration', player.duration ? player.duration.toFixed(1) + 's' : '—');
+  setDiag('CurrentTime', formatTime(player.currentTime));
+
+  if (player.readyState < 3 && player.networkState === 2 && !player.paused) {
+    setDiag('Status', 'Buffering...', 'warn');
+  } else if (player.readyState >= 3 && !player.paused) {
+    setDiag('Status', 'Playing', '');
+  } else if (player.paused) {
+    setDiag('Status', 'Paused', 'warn');
+  }
+
+  if (diagFileSize > 0 && player.buffered.length > 0) {
+    const elapsed = (Date.now() - diagStart) / 1000;
+    if (elapsed > 0.5) {
+      const pct = bufEnd / player.duration;
+      const estBytes = diagFileSize * Math.min(pct, 1);
+      const bps = estBytes * 8 / elapsed;
+      setDiag('Speed', formatSpeed(bps));
+      setDiag('Downloaded', formatBytes(estBytes));
+    }
+  }
+}
+
+function formatTime(s) {
+  if (!s || isNaN(s)) return '—';
+  const m = Math.floor(s / 60);
+  const sec = Math.floor(s % 60);
+  return m + ':' + (sec < 10 ? '0' : '') + sec;
+}
+
+loadBtn.addEventListener('click', loadVideo);
+
+const params = new URLSearchParams(location.search);
+if (params.get('msg')) msgIn.value = params.get('msg');
+if (params.get('chat')) chatIn.value = params.get('chat');
+if (params.get('auth')) authIn.value = params.get('auth');
+
+if (msgIn.value) loadVideo();
+</script>
+</body>
+</html>

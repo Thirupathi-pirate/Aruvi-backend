@@ -27,15 +27,13 @@ On each restart:
 
 ## Domain routing (Cloudflare Tunnel)
 
-| Domain | Target |
-|--------|--------|
 | Domain | Target | Notes |
 |--------|--------|-------|
-| `REDACTED_DOMAIN` | `REDACTED_IP:24696` — TelePlay (direct) | HidenCloud public port, bypasses tunnel |
+| `REDACTED_DOMAIN` | `REDACTED_IP:24696` — TelePlay (direct, A record) | HidenCloud public port, bypasses tunnel |
 | `REDACTED_DOMAIN` | `localhost:7444` — opencode Web UI | via tunnel |
 | `monitor.aaruvi.space` | `localhost:24696` — TelePlay (via tunnel proxy) | tunnel proxies /api/* + /health to TelePlay |
 
-TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696`.
+TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696` and `REDACTED_DOMAIN:24696`.
 
 ## Architecture
 
@@ -60,6 +58,21 @@ Reads from `.env` via pydantic-settings. Key fields:
 - `DATABASE_URL` defaults to `sqlite:///./data/teleplay.db`
 - `telegram_client_concurrency` = 5 (per-client semaphore)
 
+## Diagnostic endpoints (for playback testing)
+
+Added in `backend/app/routers/diagnostic.py`:
+- **`GET /api/diag/ping`** — requires `Bearer DEBUG_PASSWORD`. Returns `{"server_time": ..., "status": "ok"}`.
+- **`GET /api/diag/stream?msg=MSG_ID&chat=CHAT_ID`** — requires `Bearer DEBUG_PASSWORD`. Streams actual media from any Telegram chat (defaults to storage channel). Adds diagnostic headers: `X-Diag-Ttfb-Ms`, `X-Diag-File-Size`, `X-Diag-Content-Type`, `X-Diag-Msg-Id`, `X-Diag-Chat-Id`. Uses the same `stream_file_chunks()` pipeline as real TelePlay streaming.
+
+Frontend test page at **`/diag-player.html`** — pass `?chat=...&msg=...` as query params or use the UI. Shows live speed, buffered duration, TTFB.
+
+To find a test video: pick any public Telegram channel with a video, note the chat ID and message ID, open:
+`http://REDACTED_HOST:24696/diag-player.html?chat=-100XXX&msg=123`
+
+## `CLOUDFLARE_API_TOKEN` on server
+
+Must be in `code/.env` on HidenCloud so `cf_tunnel.py` cleanup runs at startup. Get the token from local `~/.bashrc`. If missing, `code/run.py` skips CF cleanup (non-fatal, logs warning).
+
 ## Env vars
 
 | Variable | Required | Notes |
@@ -75,6 +88,7 @@ Reads from `.env` via pydantic-settings. Key fields:
 | `WEB_BASE_URL` | no | default `http://localhost:3000` |
 | `TUNNEL_TOKEN` | no | cloudflared token |
 | `MEMORY` | no | default `16Gi`, set `3Gi` on HidenCloud |
+| `CLOUDFLARE_API_TOKEN` | no | CF API token for tunnel/DNS mgmt. Must be in `code/.env`. |
 
 ## Platform quirks
 

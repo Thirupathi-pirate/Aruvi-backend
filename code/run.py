@@ -71,11 +71,20 @@ else:
     print("CLOUDFLARE_API_TOKEN not in .env \u2014 CF cleanup skipped")
 
 # ── TelePlay (bind 0.0.0.0 for HidenCloud direct port) ──
+TELEPLAY_PORT = 7446
+# If HidenCloud exposes a PORT env var (panel port allocation), log it
+hiden_port = os.environ.get("PORT") or os.environ.get("HIDEN_PORT")
+if hiden_port:
+    print(f"HidenCloud port env var detected: {hiden_port}")
+
 def run_teleplay():
     import uvicorn as uv
-    uv.run(app, host="0.0.0.0", port=7446, log_level="info")
+    uv.run(app, host="0.0.0.0", port=TELEPLAY_PORT, log_level="info")
 
 threading.Thread(target=run_teleplay, daemon=True).start()
+print(f"TelePlay listening on 0.0.0.0:{TELEPLAY_PORT}")
+print("To expose: go to HidenCloud dashboard > Ports > map port to internal 7446")
+print("Then create DNS: REDACTED_DOMAIN -> HidenCloud IP:PORT")
 
 # ── Monitor ─────────────────────────────────────────
 STATIC_DIR = os.path.join(CODE_DIR, "app", "static")

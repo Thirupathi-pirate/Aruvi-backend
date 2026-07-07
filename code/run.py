@@ -58,9 +58,9 @@ except Exception:
     sys.exit(1)
 
 # ── Cloudflare cleanup (remove movie from tunnel + DNS) ──
-cf_token = _load_env("CLOUDFLARE_API_TOKEN")
+# Token loaded from env (bashrc) or .env (loaded above into os.environ)
+cf_token = os.environ.get("CLOUDFLARE_API_TOKEN")
 if cf_token:
-    os.environ["CLOUDFLARE_API_TOKEN"] = cf_token
     try:
         from app.cf_tunnel import cleanup as cf_cleanup
         cf_cleanup()
@@ -68,7 +68,7 @@ if cf_token:
     except Exception as e:
         print(f"CF cleanup skipped (non-fatal): {e}")
 else:
-    print("CLOUDFLARE_API_TOKEN not in .env \u2014 CF cleanup skipped")
+    print("CLOUDFLARE_API_TOKEN not set \u2014 CF cleanup skipped")
 
 # ── TelePlay (bind 0.0.0.0 for HidenCloud direct port) ──
 TELEPLAY_PORT = 7446

@@ -265,16 +265,9 @@ if os.path.exists(opencode_bin):
     try:
         subprocess.Popen([opencode_bin, "web", "--hostname", "127.0.0.1", "--port", "7444"],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("opencode web ui started on :7444")
+        print("opencode started on :7444 (web + API)")
     except Exception as e:
-        print(f"opencode web start failed: {e}")
-    # Headless server for Telegram bot and programmatic access
-    try:
-        subprocess.Popen([opencode_bin, "serve", "--hostname", "127.0.0.1", "--port", "7736"],
-                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        print("opencode server (API) started on :7736")
-    except Exception as e:
-        print(f"opencode serve start failed: {e}")
+        print(f"opencode start failed: {e}")
 
 # ── opencode Telegram Bot (grinev) ──────────────────
 opencode_bot_token = _load_env("OPENCODE_BOT_TOKEN")
@@ -324,7 +317,7 @@ if opencode_bot_token and opencode_bot_user_id:
         with open(os.path.join(bot_config_dir, ".env"), "w") as f:
             f.write(f"TELEGRAM_BOT_TOKEN={opencode_bot_token}\n")
             f.write(f"TELEGRAM_ALLOWED_USER_ID={opencode_bot_user_id}\n")
-            f.write("OPENCODE_API_URL=http://127.0.0.1:7736\n")
+            f.write("OPENCODE_API_URL=http://127.0.0.1:7444\n")
             f.write("OPENCODE_MODEL_PROVIDER=opencode\n")
             f.write("OPENCODE_MODEL_ID=big-pickle\n")
         env = os.environ.copy()

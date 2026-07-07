@@ -164,7 +164,7 @@ def cleanup(token=None):
         tid, tname = find_tunnel(token, aid)
         logger.info("Tunnel: %s (%s)", tname, tid)
         _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:24696")
-        _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:7736")
+        _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:7444")
         zid = get_zone_id(token)
         _ensure_dns(token, zid, "movie")
         _ensure_dns(token, zid, "test")

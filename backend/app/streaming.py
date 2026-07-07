@@ -520,6 +520,37 @@ async def parallel_stream_generator(
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
         return current - 1 == batch_end
 
+    async def _fetch_batch_with_timeout(batch_start, batch_end, cl, msg, sem):
+        """_fetch_batch with a 10s watchdog — races unresolved chunks via alt clients."""
+        async def _watchdog(main_task):
+            try:
+                await asyncio.sleep(10)
+                if not main_task.done():
+                    unresolved = [
+                        co for co in range(batch_start, batch_end + 1)
+                        if not results[co].done()
+                    ]
+                    if unresolved:
+                        logger.warning(
+                            "Batch %d-%d timeout (%d left), alt-fetching...",
+                            batch_start, batch_end, len(unresolved)
+                        )
+                        for co in unresolved:
+                            asyncio.create_task(
+                                _retry_chunk_with_alt_client(c_idx, co, chat_id, message_id, results)
+                            )
+            except asyncio.CancelledError:
+                pass
+
+        main_task = asyncio.create_task(
+            _fetch_batch(batch_start, batch_end, cl, msg, sem)
+        )
+        watchdog = asyncio.create_task(_watchdog(main_task))
+        try:
+            return await main_task
+        finally:
+            watchdog.cancel()
+
     async def _fetch_one(chunk_offset, cl, msg, sem):
         """Fetch a single chunk, forward-caching it on success."""
         try:
@@ -584,7 +615,7 @@ async def parallel_stream_generator(
 
             batch_ok = False
             try:
-                batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                batch_ok = await _fetch_batch_with_timeout(batch_start, batch_end, client, local_msg, semaphore)
             except (FileReferenceInvalid, FileReferenceExpired):
                 logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
                 try:

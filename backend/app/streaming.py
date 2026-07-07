@@ -8,7 +8,7 @@ import time
 import logging
 from typing import AsyncGenerator
 
-BATCH_SIZE = 10  # chunks per stream_media call (fewer RPCs = faster)
+BATCH_SIZE = 15  # chunks per stream_media call (fewer RPCs = faster)
 
 
 class ChunkCache:
@@ -654,10 +654,25 @@ async def parallel_stream_generator(
         asyncio.create_task(worker(i)) for i in range(concurrency)
     ]
 
-    # Yield results in order. No artificial lookahead wait — the 2s timeout
-    # previously here caused per-chunk latency spikes when the prebuffer
-    # was partially drained. Workers naturally stay ahead at 10x speed.
-    DEFAULT_YIELD_CHUNK = 1024 * 1024
+    # ── Yield smoothing: prebuffer before yielding ─────────────────────
+    # Wait for MIN_PREBUFFER chunks before the first yield so workers
+    # build a pipeline ahead of the HTTP response stream. This absorbs
+    # batch-to-batch jitter (flood waits, slow DC) without client-side
+    # rebuffering. At ~4.4 chunks/s throughput and 14 workers, the first
+    # 20 chunks complete in ~2-3s while workers also start 2nd+ batches.
+    MIN_PREBUFFER = 20
+    prebuffer_n = min(MIN_PREBUFFER, total_chunks)
+    if prebuffer_n > 1:
+        prebuffer_futs = [
+            results[start_chunk + i] for i in range(prebuffer_n)
+        ]
+        await asyncio.gather(*prebuffer_futs)
+        logger.info("Prebuffered %d / %d chunks (%.1f MB)",
+                    prebuffer_n, total_chunks,
+                    prebuffer_n * chunk_size / 1024 / 1024)
+    elif prebuffer_n == 1:
+        await results[start_chunk]
+
     stream_start = time.perf_counter()
     first_chunk_logged = False
     cache_served = 0
@@ -667,6 +682,7 @@ async def parallel_stream_generator(
             chunk_idx = start_chunk + offset
 
             # Try cache first (backward seek), fall back to fetch result
+            # After prebuffer, the first MIN_PREBUFFER chunks are already resolved.
             cached_data = video_cache.get(chunk_idx)
             if cached_data is not None:
                 chunk_data = cached_data

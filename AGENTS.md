@@ -42,11 +42,10 @@ TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696` 
 - **Bot handlers** registered via `from . import bot` (side-effect) — decorators `@tg_client.on_message`, `@tg_client.on_callback_query`
 - **Client pool** built at **module level** in `telegram.py` — `clients[0]` = main bot, `clients[1:]` = 13 helpers. Each gets `pool_index` attr.
 - **Monkey-patched Pyrogram** in `patch.py` (`PatchedClient`) — adds `wait_for_message`, `wait_for_callback_query`, fixes loop capture under uvicorn
-- **Parallel streaming** in `streaming.py` — multi-client pool, BATCH_SIZE=5 (5×1MB chunks per bot batch), fast-start (1-chunk parallel across all bots)
-- **Sliding window cache** — 300MB forward + 100MB backward per stream, with a **global 500MB RAM limit** across all streams enforced by `CacheManager._evict_one()`; remaining chunks on NVMe at `data/chunks/{chat_id}/{message_id}/{chunk_idx}`
-- **Disk limit** — NVMe cache auto-evicts oldest files when exceeding 13GB (background task every hour)
+- **Parallel streaming** in `streaming.py` — multi-client pool, BATCH_SIZE=15 (15×1MB chunks per bot batch), 14 workers pull from a shared task queue
+- **Yield smoothing** (`streaming.py:663-674`) — waits for MIN_PREBUFFER=20 chunks before first yield. Workers build a pipeline ahead of the HTTP response, absorbing batch-to-batch jitter (flood waits, slow DC). At ~4.4 chunks/s tunnel throughput and 14 workers, the first 20 chunks complete in ~2-3s while workers also start subsequent batches.
+- **RAM-only ChunkCache** (`streaming.py:ChunkCache`) — 100MB per-video FIFO cache for backward-seek support. No disk spill. Managed globally by `CacheManager`.
 - **OOM guard** in `status.py` — percentage-based at 80% of cgroup memory limit, auto-clears RAM caches
-- **StreamCache** (`streaming.py:StreamCache`) — position-aware; `set_position(chunk_idx)` on each yield, `store()` routes within window to RAM, outside to disk; `get()` checks RAM then disk
 - **Database** in `database.py` — auto-detects sqlite (default) vs postgresql from `DATABASE_URL`, auto-migrates missing columns
 - **SPA catch-all** in `main.py` — serves `app/static/index.html` for any non-API route
 
@@ -56,7 +55,8 @@ Reads from `.env` via pydantic-settings. Key fields:
 - `SERVER_PORT` alias (default `24696`)
 - `JWT_SECRET` — auto-generated if unset (sessions invalidate on restart)
 - `DATABASE_URL` defaults to `sqlite:///./data/teleplay.db`
-- `telegram_client_concurrency` = 5 (per-client semaphore)
+- `telegram_client_concurrency` = 5 (per-client semaphore for Pyrogram)
+- Tunable constants in `streaming.py`: `BATCH_SIZE=15` (chunks per RPC), `MIN_PREBUFFER=20` (chunks before first yield), `_stream_semaphore=5` (concurrent video streams)
 
 ## Diagnostic endpoints (for playback testing)
 

@@ -95,18 +95,18 @@ except Exception:
     traceback.print_exc()
     sys.exit(1)
 
-# ── Cloudflare cleanup (remove movie from tunnel + DNS) ──
+# ── Cloudflare tunnel setup (ensure movie on tunnel) ──
 # Token loaded from env (bashrc) or .env (loaded above into os.environ)
 cf_token = os.environ.get("CLOUDFLARE_API_TOKEN")
 if cf_token:
     try:
-        from app.cf_tunnel import cleanup as cf_cleanup
-        cf_cleanup()
-        print("CF cleanup done \u2014 movie removed from tunnel + DNS")
+        from app.cf_tunnel import cleanup as cf_setup
+        cf_setup()
+        print("CF setup done \u2014 REDACTED_DOMAIN added to tunnel + DNS")
     except Exception as e:
-        print(f"CF cleanup skipped (non-fatal): {e}")
+        print(f"CF setup skipped (non-fatal): {e}")
 else:
-    print("CLOUDFLARE_API_TOKEN not set \u2014 CF cleanup skipped")
+    print("CLOUDFLARE_API_TOKEN not set \u2014 CF setup skipped")
 
 # ── TelePlay (bind 0.0.0.0 for HidenCloud direct port) ──
 TELEPLAY_PORT = 24696
@@ -121,8 +121,8 @@ def run_teleplay():
 
 threading.Thread(target=run_teleplay, daemon=True).start()
 print(f"TelePlay listening on 0.0.0.0:{TELEPLAY_PORT}")
-print("TelePlay on HidenCloud public port 24696 — accessible at REDACTED_HOST:24696")
-print("Create DNS: REDACTED_DOMAIN -> REDACTED_IP (or CNAME REDACTED_HOST)")
+print("TelePlay on HidenCloud public port 24696 (direct) and via tunnel at REDACTED_DOMAIN")
+print("Tunnel CNAME: REDACTED_DOMAIN -> REDACTED_TUNNEL")
 
 # ── Monitor ─────────────────────────────────────────
 STATIC_DIR = os.path.join(CODE_DIR, "app", "static")

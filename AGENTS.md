@@ -29,11 +29,11 @@ On each restart:
 
 | Domain | Target | Notes |
 |--------|--------|-------|
-| `REDACTED_DOMAIN` | `REDACTED_IP:24696` — TelePlay (direct, A record) | HidenCloud public port, bypasses tunnel |
+| `REDACTED_DOMAIN` | `localhost:24696` — TelePlay (via tunnel) | CNAME to tunnel endpoint, proxied |
 | `REDACTED_DOMAIN` | `localhost:7444` — opencode Web UI | via tunnel |
-| `monitor.aaruvi.space` | `localhost:24696` — TelePlay (via tunnel proxy) | tunnel proxies /api/* + /health to TelePlay |
+| `monitor.aaruvi.space` | `localhost:7442` — monitor proxy | tunnel proxies /api/* + /health to TelePlay via monitor |
 
-TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696` and `REDACTED_DOMAIN:24696`.
+TelePlay binds `0.0.0.0:24696` — directly accessible at `REDACTED_HOST:24696` (2 Mbps capped) and via tunnel at `REDACTED_DOMAIN` (22 Mbps).
 
 ## Architecture
 
@@ -71,7 +71,7 @@ To find a test video: pick any public Telegram channel with a video, note the ch
 
 ## `CLOUDFLARE_API_TOKEN` on server
 
-Must be in `code/.env` on HidenCloud so `cf_tunnel.py` cleanup runs at startup. Get the token from local `~/.bashrc`. If missing, `code/run.py` skips CF cleanup (non-fatal, logs warning).
+Must be in `code/.env` on HidenCloud so `cf_tunnel.py` setup runs at startup (ensures REDACTED_DOMAIN is on tunnel + DNS). Get the token from local `~/.bashrc`. If missing, `code/run.py` skips CF setup (non-fatal, logs warning).
 
 ## Env vars
 

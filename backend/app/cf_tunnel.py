@@ -1,6 +1,6 @@
 """
-Cloudflare API helpers — remove REDACTED_DOMAIN from tunnel ingress + DNS
-at startup so port 24696 can be exposed directly via HidenCloud.
+Cloudflare API helpers — ensure REDACTED_DOMAIN is served via tunnel.
+Adds/verifies tunnel ingress + CNAME DNS so port 24696 routes through CF.
 """
 import os
 import logging
@@ -9,6 +9,7 @@ import httpx
 logger = logging.getLogger(__name__)
 
 API_BASE = "https://api.cloudflare.com/client/v4"
+TUNNEL_HOSTNAME = "REDACTED_TUNNEL"
 
 
 class CFApiError(Exception):
@@ -44,6 +45,17 @@ def _put(token, path, body):
         return data["result"]
 
 
+def _post(token, path, body):
+    with httpx.Client() as c:
+        r = c.post(f"{API_BASE}{path}", headers=_headers(token), json=body, timeout=15)
+        if r.status_code != 200:
+            raise CFApiError(f"POST {path} failed: {r.status_code} {r.text[:200]}")
+        data = r.json()
+        if not data.get("success"):
+            raise CFApiError(f"POST {path} API error: {data.get('errors', [])}")
+        return data["result"]
+
+
 def _delete(token, path):
     with httpx.Client() as c:
         r = c.delete(f"{API_BASE}{path}", headers=_headers(token), timeout=15)
@@ -75,104 +87,67 @@ def find_tunnel(token, account_id, tunnel_name=None):
     return tunnels[0]["id"], tunnels[0].get("name", "unknown")
 
 
-def remove_movie_ingress(token, account_id, tunnel_id):
-    config = _get(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations")
-    ingress = config.get("config", {}).get("ingress", [])
-    if not ingress:
-        logger.warning("No ingress rules in tunnel config")
-        return False
-
-    before = len(ingress)
-    config["config"]["ingress"] = [
-        r for r in ingress if r.get("hostname") != "REDACTED_DOMAIN"
-    ]
-    if len(config["config"]["ingress"]) == before:
-        logger.info("REDACTED_DOMAIN not found in tunnel ingress")
-        return False
-
-    _put(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", config)
-    logger.info("Removed REDACTED_DOMAIN from tunnel ingress")
-    return True
-
-
-def delete_movie_dns(token):
+def get_zone_id(token):
     zones = _get(token, "/zones?name=aaruvi.space")
     if not zones:
-        logger.info("Zone 'aaruvi.space' not found — DNS skip")
-        return False
-    zone_id = zones[0]["id"]
+        raise CFApiError("Zone 'aaruvi.space' not found")
+    return zones[0]["id"]
 
-    records = _get(token, f"/zones/{zone_id}/dns_records?name=REDACTED_DOMAIN")
-    if not records:
-        logger.info("No DNS record for REDACTED_DOMAIN")
+
+def add_movie_ingress(token, account_id, tunnel_id):
+    config = _get(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations")
+    ingress = config.get("config", {}).get("ingress", [])
+
+    catch_all = [r for r in ingress if r.get("hostname") is None]
+    others = [r for r in ingress if r.get("hostname") is not None]
+
+    existing = [r for r in others if r.get("hostname") == "REDACTED_DOMAIN"]
+    if existing:
+        logger.info("REDACTED_DOMAIN already in tunnel ingress")
         return False
 
-    for rec in records:
-        _delete(token, f"/zones/{zone_id}/dns_records/{rec['id']}")
-        logger.info(
-            "Deleted DNS record %s %s \u2192 %s",
-            rec["type"], rec["name"], rec.get("content", "?"),
-        )
+    others.append({"hostname": "REDACTED_DOMAIN", "service": "http://localhost:24696"})
+    config["config"]["ingress"] = others + catch_all
+    _put(token, f"/accounts/{account_id}/cfd_tunnel/{tunnel_id}/configurations", config)
+    logger.info("Added REDACTED_DOMAIN → localhost:24696 to tunnel ingress")
     return True
 
 
-def create_movie_dns(token=None, ip="REDACTED_IP"):
-    token = token or os.environ.get("CLOUDFLARE_API_TOKEN")
-    if not token:
-        logger.warning("CLOUDFLARE_API_TOKEN not set — skipping DNS create")
-        return False
-
-    try:
-        zones = _get(token, "/zones?name=aaruvi.space")
-        if not zones:
-            logger.info("Zone 'aaruvi.space' not found — DNS skip")
-            return False
-        zone_id = zones[0]["id"]
-
-        records = _get(token, f"/zones/{zone_id}/dns_records?name=REDACTED_DOMAIN")
-        if records:
-            logger.info("DNS record for REDACTED_DOMAIN already exists — skipping")
+def ensure_movie_dns(token, zone_id):
+    records = _get(token, f"/zones/{zone_id}/dns_records?name=REDACTED_DOMAIN")
+    if records:
+        existing = records[0]
+        if existing.get("type") == "CNAME" and existing.get("content") == TUNNEL_HOSTNAME:
+            logger.info("CNAME for REDACTED_DOMAIN already correct — skipping")
             return True
+        if existing.get("type") == "A":
+            _delete(token, f"/zones/{zone_id}/dns_records/{existing['id']}")
+            logger.info("Deleted stale A record for REDACTED_DOMAIN")
 
-        body = {
-            "type": "A",
-            "name": "movie",
-            "content": ip,
-            "ttl": 120,
-            "proxied": False,
-        }
-        with httpx.Client() as c:
-            r = c.post(
-                f"{API_BASE}/zones/{zone_id}/dns_records",
-                headers=_headers(token),
-                json=body,
-                timeout=15,
-            )
-            if r.status_code != 200:
-                logger.error("DNS create failed: %s %s", r.status_code, r.text[:200])
-                return False
-            data = r.json()
-            if not data.get("success"):
-                logger.error("DNS create API error: %s", data.get("errors", []))
-                return False
-            logger.info("Created A record REDACTED_DOMAIN → %s", ip)
-            return True
-    except Exception as e:
-        logger.error("DNS create failed: %s", e)
-        return False
+    body = {
+        "type": "CNAME",
+        "name": "movie",
+        "content": TUNNEL_HOSTNAME,
+        "ttl": 120,
+        "proxied": True,
+    }
+    _post(token, f"/zones/{zone_id}/dns_records", body)
+    logger.info("Created CNAME REDACTED_DOMAIN → %s", TUNNEL_HOSTNAME)
+    return True
 
 
 def cleanup(token=None):
     token = token or os.environ.get("CLOUDFLARE_API_TOKEN")
     if not token:
-        logger.warning("CLOUDFLARE_API_TOKEN not set \u2014 skipping CF cleanup")
+        logger.warning("CLOUDFLARE_API_TOKEN not set — skipping CF setup")
         return
 
     try:
         aid = get_account_id(token)
         tid, tname = find_tunnel(token, aid)
         logger.info("Tunnel: %s (%s)", tname, tid)
-        remove_movie_ingress(token, aid, tid)
-        delete_movie_dns(token)
+        add_movie_ingress(token, aid, tid)
+        zid = get_zone_id(token)
+        ensure_movie_dns(token, zid)
     except CFApiError as e:
-        logger.error("CF cleanup failed: %s", e)
+        logger.error("CF setup failed: %s", e)

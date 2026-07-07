@@ -197,11 +197,18 @@ async def health():
 
 @app.post("/api/restart")
 async def api_restart():
-    """Restart the entire process (HidenCloud will re-launch)."""
-    import sys
-    logger.warning("Restart requested via /api/restart — exiting")
-    sys.stdout.flush()
-    os._exit(0)
+    """Restart Telegram clients and clear caches (soft restart, no os._exit)."""
+    from .streaming import _cache_manager, _forward_streams, _cancel_restart
+    from .telegram import stop_all_clients, start_all_clients
+
+    _cancel_restart()
+    _forward_streams.clear()
+    freed = _cache_manager.clear_all()
+    logger.warning("Restarting Telegram clients (cache cleared: %.1f MB)...", freed / 1024 / 1024)
+    await stop_all_clients()
+    await start_all_clients()
+    logger.warning("Restart complete — all clients reconnected")
+    return {"status": "ok", "cleared_mb": round(freed / 1024 / 1024, 1)}
 
 @app.get("/diag")
 async def diagnostic(request: Request):

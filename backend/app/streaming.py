@@ -225,6 +225,14 @@ def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
         _client_semaphores[client_index] = asyncio.Semaphore(settings.telegram_client_concurrency)
     return _client_semaphores[client_index]
 
+# Per-client reconnection lock: prevents concurrent reconnect racing with in-flight RPCs
+_client_reconnect_locks: dict[int, asyncio.Lock] = {}
+
+def get_client_reconnect_lock(client_index: int) -> asyncio.Lock:
+    if client_index not in _client_reconnect_locks:
+        _client_reconnect_locks[client_index] = asyncio.Lock()
+    return _client_reconnect_locks[client_index]
+
 
 # ── Chunk fetch helpers ────────────────────────────────────────────────────────
 
@@ -266,23 +274,24 @@ async def _retry_chunk_with_alt_client(
                     return
             except AuthKeyUnregistered:
                 logger.warning("Alt bot %d: auth key expired, reconnecting...", alt_c_idx)
-                if await reconnect_client(alt_client):
-                    try:
-                        alt_msg = await alt_client.get_messages(chat_id, message_id)
-                        if alt_msg:
-                            async with get_client_semaphore(alt_c_idx):
-                                data = bytearray()
-                                async for part in alt_client.stream_media(
-                                    alt_msg, limit=1, offset=chunk_idx
-                                ):
-                                    data.extend(part)
-                            chunk_bytes = bytes(data)
-                            _cache_manager.get_cache(chat_id, message_id).put(chunk_idx, chunk_bytes)
-                            if not results[chunk_idx].done():
-                                results[chunk_idx].set_result(chunk_bytes)
-                                return
-                    except Exception:
-                        pass
+                async with get_client_reconnect_lock(alt_c_idx):
+                    if await reconnect_client(alt_client):
+                        try:
+                            alt_msg = await alt_client.get_messages(chat_id, message_id)
+                            if alt_msg:
+                                async with get_client_semaphore(alt_c_idx):
+                                    data = bytearray()
+                                    async for part in alt_client.stream_media(
+                                        alt_msg, limit=1, offset=chunk_idx
+                                    ):
+                                        data.extend(part)
+                                chunk_bytes = bytes(data)
+                                _cache_manager.get_cache(chat_id, message_id).put(chunk_idx, chunk_bytes)
+                                if not results[chunk_idx].done():
+                                    results[chunk_idx].set_result(chunk_bytes)
+                                    return
+                        except Exception:
+                            pass
             except Exception as e:
                 err_str = str(e).lower()
                 if "flood" in err_str:
@@ -623,12 +632,13 @@ async def parallel_stream_generator(
                     pass
             except AuthKeyUnregistered:
                 logger.warning("Bot %d: auth key expired in batch, reconnecting...", c_idx)
-                if await reconnect_client(client):
-                    try:
-                        local_msg = await client.get_messages(chat_id, message_id)
-                        batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                    except Exception:
-                        pass
+                async with get_client_reconnect_lock(c_idx):
+                    if await reconnect_client(client):
+                        try:
+                            local_msg = await client.get_messages(chat_id, message_id)
+                            batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                        except Exception:
+                            pass
             except Exception as e:
                 logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
 
@@ -661,22 +671,23 @@ async def parallel_stream_generator(
                         logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
                 except AuthKeyUnregistered:
                     logger.warning("Bot %d: auth key expired for chunk %d", c_idx, chunk_offset)
-                    if await reconnect_client(client):
-                        try:
-                            local_msg = await client.get_messages(chat_id, message_id)
-                            async with semaphore:
-                                d = bytearray()
-                                async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                    d.extend(part)
-                            data = bytes(d)
-                            video_cache.put(chunk_offset, data)
-                            if not results[chunk_offset].done():
-                                results[chunk_offset].set_result(data)
-                            continue
-                        except Exception as e2:
-                            logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
-                    else:
-                        logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
+                    async with get_client_reconnect_lock(c_idx):
+                        if await reconnect_client(client):
+                            try:
+                                local_msg = await client.get_messages(chat_id, message_id)
+                                async with semaphore:
+                                    d = bytearray()
+                                    async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
+                                        d.extend(part)
+                                data = bytes(d)
+                                video_cache.put(chunk_offset, data)
+                                if not results[chunk_offset].done():
+                                    results[chunk_offset].set_result(data)
+                                continue
+                            except Exception as e2:
+                                logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
+                        else:
+                            logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                 except Exception as e:
                     logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
                 await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)

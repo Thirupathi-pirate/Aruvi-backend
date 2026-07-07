@@ -24,8 +24,8 @@ from .routers import files_router, folders_router, streaming_router, auth_router
 # Import bot to register handlers
 from . import bot  # noqa
 
-logging.getLogger("pyrogram").setLevel(logging.DEBUG)
-logging.getLogger("pyrogram.dispatcher").setLevel(logging.DEBUG)
+logging.getLogger("pyrogram").setLevel(logging.WARNING)
+logging.getLogger("pyrogram.dispatcher").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()

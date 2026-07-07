@@ -302,6 +302,10 @@ if opencode_bot_token and opencode_bot_user_id:
                         dest = os.path.join(node_dir, name)
                         if m.isdir():
                             os.makedirs(dest, exist_ok=True)
+                        elif m.issym() or m.islnk():
+                            if os.path.exists(dest) or os.path.islink(dest):
+                                os.remove(dest)
+                            os.symlink(m.linkname, dest)
                         else:
                             with open(dest, "wb") as f:
                                 f.write(tar.extractfile(m).read())
@@ -321,6 +325,7 @@ if opencode_bot_token and opencode_bot_user_id:
             f.write("OPENCODE_MODEL_PROVIDER=opencode\n")
             f.write("OPENCODE_MODEL_ID=big-pickle\n")
         env = os.environ.copy()
+        env.pop("TELEGRAM_BOT_TOKEN", None)  # don't leak TelePlay bot token
         env["PATH"] = os.path.dirname(node_bin) + ":" + env.get("PATH", "")
         try:
             subprocess.Popen(

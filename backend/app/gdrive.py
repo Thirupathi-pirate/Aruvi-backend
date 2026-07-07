@@ -16,6 +16,7 @@ from datetime import datetime
 from pathlib import Path
 
 import httpx
+from google.auth.exceptions import RefreshError
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google.oauth2.credentials import Credentials as UserCredentials
 from google_auth_oauthlib.flow import Flow
@@ -29,6 +30,11 @@ _log = logging.getLogger(__name__)
 settings = get_settings()
 
 SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+
+
+class TokenExpiredError(Exception):
+    """Google OAuth refresh token has been revoked or expired."""
+    pass
 
 # In-memory nonce store for OAuth CSRF protection
 # {nonce: (telegram_id, timestamp, code_verifier)}
@@ -149,27 +155,37 @@ def _creds_from_dict(d: dict) -> UserCredentials:
     )
 
 
-def get_access_token(token_dict: dict) -> str:
-    """Return a valid access token string, refreshing if needed."""
+def _refresh_creds(token_dict: dict) -> UserCredentials:
+    """Refresh credentials if expired.  Raises TokenExpiredError on invalid_grant
+    (revoked/expired refresh token) and clears the refresh_token in token_dict."""
     creds = _creds_from_dict(token_dict)
     if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleAuthRequest())
+        try:
+            creds.refresh(GoogleAuthRequest())
+        except RefreshError as e:
+            if "invalid_grant" in str(e):
+                token_dict["refresh_token"] = None
+                token_dict.pop("expiry", None)
+                raise TokenExpiredError(
+                    "Google Drive authorization expired. Send /drive to reconnect."
+                )
+            raise
         token_dict["token"] = creds.token
         if creds.expiry:
             token_dict["expiry"] = creds.expiry.isoformat()
-    return creds.token
+    return creds
+
+
+def get_access_token(token_dict: dict) -> str:
+    """Return a valid access token string, refreshing if needed."""
+    return _refresh_creds(token_dict).token
 
 
 def build_service(token_dict: dict):
     """Build an authenticated Google Drive API v3 service from a stored
-    token dict.  Auto-refreshes the access token if expired."""
-    creds = _creds_from_dict(token_dict)
-    if creds.expired and creds.refresh_token:
-        creds.refresh(GoogleAuthRequest())
-        token_dict["token"] = creds.token
-        if creds.expiry:
-            token_dict["expiry"] = creds.expiry.isoformat()
-    return build("drive", "v3", credentials=creds)
+    token dict.  Auto-refreshes the access token if expired.
+    Raises TokenExpiredError if the refresh token has been revoked."""
+    return build("drive", "v3", credentials=_refresh_creds(token_dict))
 
 
 async def ensure_aruvi_folder(service) -> str:
@@ -362,16 +378,23 @@ async def upload_streaming(
     if not file_id:
         raise RuntimeError("Upload completed but no file ID returned")
 
-    service = build_service(token_dict)
-    file_meta = (
-        service.files()
-        .get(fileId=file_id, fields="webViewLink")
-        .execute()
-    )
-    return file_meta.get(
-        "webViewLink",
-        f"https://drive.google.com/file/d/{file_id}/view",
-    )
+    try:
+        service = build_service(token_dict)
+        file_meta = (
+            service.files()
+            .get(fileId=file_id, fields="webViewLink")
+            .execute()
+        )
+        return file_meta.get(
+            "webViewLink",
+            f"https://drive.google.com/file/d/{file_id}/view",
+        )
+    except TokenExpiredError:
+        _log.warning("Token expired after upload completed — returning fallback link")
+        return f"https://drive.google.com/file/d/{file_id}/view"
+    except Exception:
+        _log.exception("Failed to fetch webViewLink — returning fallback")
+        return f"https://drive.google.com/file/d/{file_id}/view"
 
 
 async def _upload_block(

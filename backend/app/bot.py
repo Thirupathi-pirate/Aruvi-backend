@@ -1435,7 +1435,10 @@ async def handle_callback(client, callback: CallbackQuery):
                     )
                     u = u_result.scalar_one_or_none()
                     if u:
-                        u.gdrive_token = json.dumps(token_dict)
+                        if token_dict.get("refresh_token"):
+                            u.gdrive_token = json.dumps(token_dict)
+                        else:
+                            u.gdrive_token = None
                         await db.commit()
 
                 try:
@@ -1448,6 +1451,34 @@ async def handle_callback(client, callback: CallbackQuery):
                     )
                 except Exception:
                     pass
+
+                if not token_dict.get("refresh_token"):
+                    try:
+                        await callback.message.reply(
+                            "⚠️ Your Google Drive authorization has expired. "
+                            "Send /drive to reconnect for future uploads."
+                        )
+                    except Exception:
+                        pass
+
+            except gdrive_mod.TokenExpiredError:
+                _log.warning("GDrive token expired for user %s", callback.from_user.id)
+                async with async_session() as db:
+                    u_result = await db.execute(
+                        select(User).where(User.telegram_id == callback.from_user.id)
+                    )
+                    u = u_result.scalar_one_or_none()
+                    if u:
+                        u.gdrive_token = None
+                        await db.commit()
+                try:
+                    await callback.message.edit(
+                        "❌ **Google Drive authorization expired.**\n\n"
+                        "Your connection has been revoked. Send /drive to reconnect."
+                    )
+                except Exception:
+                    pass
+
             except Exception as e:
                 _log.exception("GDrive upload failed for file %s", file_id)
                 try:

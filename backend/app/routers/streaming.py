@@ -14,7 +14,7 @@ from ..models import File, User
 from ..auth import get_current_user, get_current_user_opt, verify_token, verify_token_payload
 
 from ..telegram import get_message_from_channel, tg_client, clients
-from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams
+from ..streaming import stream_file as stream_file_chunks, prefetch_first_batch, _cache_manager, _forward_streams, _dc_disk_size
 from ..config import get_settings
 from ..rate_limit import limiter
 
@@ -69,52 +69,56 @@ async def streaming_debug(request: Request):
         except Exception:
             raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-    cache_info = _cache_manager.info
-    per_video = _cache_manager.per_video
+    try:
+        cache_info = _cache_manager.info
+        per_video = _cache_manager.per_video
 
-    disk_bytes = _dc_disk_size()
-    disk_mb = round(disk_bytes / 1024 / 1024, 1)
+        disk_bytes = _dc_disk_size()
+        disk_mb = round(disk_bytes / 1024 / 1024, 1)
 
-    bots = []
-    for i, c in enumerate(clients):
-        bots.append({
-            "index": i,
-            "label": "Main" if i == 0 else f"Helper {i}",
-            "connected": c.is_connected,
-        })
+        bots = []
+        for i, c in enumerate(clients):
+            bots.append({
+                "index": i,
+                "label": "Main" if i == 0 else f"Helper {i}",
+                "connected": c.is_connected,
+            })
 
-    forward_info = []
-    for mid in list(_forward_streams.keys()):
-        info = _forward_streams.get(mid)
-        if not info:
-            continue
-        futures = info.get("results", {})
-        done = sum(1 for f in list(futures.values()) if f.done())
-        total = info.get("total_chunks", 0)
-        forward_info.append({
-            "message_id": mid,
-            "done_futures": done,
-            "total_futures": len(futures),
-            "total_chunks": total,
-        })
+        forward_info = []
+        for mid in list(_forward_streams.keys()):
+            info = _forward_streams.get(mid)
+            if not info:
+                continue
+            futures = info.get("results", {})
+            done = sum(1 for f in list(futures.values()) if f.done())
+            total = info.get("total_chunks", 0)
+            forward_info.append({
+                "message_id": mid,
+                "done_futures": done,
+                "total_futures": len(futures),
+                "total_chunks": total,
+            })
 
-    return {
-        "cache": {
-            "ram_chunks": cache_info["chunks"],
-            "ram_mb": cache_info["size_mb"],
-            "hits": cache_info["hits"],
-            "misses": cache_info["misses"],
-            "evictions": cache_info["evictions"],
-            "hit_rate_pct": round(
-                cache_info["hits"] / (cache_info["hits"] + cache_info["misses"]) * 100, 1
-            ) if (cache_info["hits"] + cache_info["misses"]) > 0 else 0,
-            "per_video": per_video,
-        },
-        "disk_cache_mb": disk_mb,
-        "bots": bots,
-        "active_streams": forward_info,
-        "active_stream_count": len(forward_info),
-    }
+        return {
+            "cache": {
+                "ram_chunks": cache_info["chunks"],
+                "ram_mb": cache_info["size_mb"],
+                "hits": cache_info["hits"],
+                "misses": cache_info["misses"],
+                "evictions": cache_info["evictions"],
+                "hit_rate_pct": round(
+                    cache_info["hits"] / (cache_info["hits"] + cache_info["misses"]) * 100, 1
+                ) if (cache_info["hits"] + cache_info["misses"]) > 0 else 0,
+                "per_video": per_video,
+            },
+            "disk_cache_mb": disk_mb,
+            "bots": bots,
+            "active_streams": forward_info,
+            "active_stream_count": len(forward_info),
+        }
+    except Exception as e:
+        logger.exception("Failed to build debug response")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 @router.get("/{file_id}")

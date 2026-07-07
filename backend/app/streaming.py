@@ -2,6 +2,7 @@
 Custom streaming utilities for Telegram media files.
 Multi-client parallel streaming for maximum download speed.
 """
+import gc
 import asyncio
 import re
 import time
@@ -190,8 +191,10 @@ def _cancel_restart():
 def _do_restart():
     global _pending_restart
     _pending_restart = None
+    _forward_streams.clear()
     freed = _cache_manager.clear_all()
-    logger.warning("No active streams — cleared %.1f MB from cache", freed / 1024 / 1024)
+    gc.collect()
+    logger.warning("No active streams — cleared %.1f MB from cache, GC collected", freed / 1024 / 1024)
 
 def _schedule_restart(delay: float = 15.0):
     global _pending_restart

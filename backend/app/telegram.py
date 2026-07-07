@@ -98,9 +98,10 @@ async def start_one_client(i, c):
                 continue
             tb = traceback.format_exc()
             diag_log(f"Client {i} failed to start after {max_attempts} attempts: {e}\n{tb}")
-    # If all attempts exhausted and this is main bot, propagate failure
+    # If all attempts exhausted and this is main bot, log and continue
+    # (server starts without it; background retries in _finish_startup)
     if i == 0 and not c.is_connected:
-        raise RuntimeError(f"Bot 0 failed to connect after {max_attempts} attempts")
+        diag_log(f"Bot 0 failed to connect after {max_attempts} attempts — starting server anyway")
 
 
 async def start_all_clients():
@@ -141,12 +142,13 @@ async def reconnect_client(client: Client) -> bool:
 
 
 async def start_telegram_client():
-    """Called from app lifespan — starts main bot immediately, helpers in background.
+    """Called from app lifespan — starts main bot in background, helpers in background.
     
+    Server starts immediately even if Telegram DC is unreachable.
     Returns the background task so the caller can cancel it on shutdown.
     """
-    await start_one_client(0, clients[0])
-    diag_log("Main client started — app is ready to serve")
+    asyncio.create_task(start_one_client(0, clients[0]))
+    diag_log("Client 0 starting in background — app is ready to serve")
     task = asyncio.create_task(_finish_startup())
     return task
 
@@ -223,8 +225,31 @@ async def _finish_startup():
                 diag_log(f"  Bot token starts with: {getattr(c, 'bot_token', '?')[:8]}...")
                 diag_log(f"  Error: {e}")
 
+    # Retry bot 0 if it failed earlier (transient Telegram DC issue)
+    if not clients[0].is_connected:
+        asyncio.create_task(_retry_bot_0())
+
     # Warm up: pre-fetch recent messages so first user request is fast
     asyncio.create_task(_warmup_messages())
+
+
+async def _retry_bot_0():
+    """Retry main bot connection in background with exponential backoff."""
+    for attempt in range(1, 11):
+        await asyncio.sleep(min(30 * attempt, 300))  # 30s, 60s, ... up to 5min
+        if clients[0].is_connected:
+            diag_log("Bot 0 reconnected on retry attempt")
+            return
+        diag_log(f"Retrying bot 0 connection (attempt {attempt}/10)...")
+        try:
+            await asyncio.wait_for(clients[0].start(), timeout=20)
+            if clients[0].is_connected:
+                me = await clients[0].get_me()
+                diag_log(f"Bot 0 reconnected → @{me.username}")
+                return
+        except Exception as e:
+            diag_log(f"Bot 0 retry {attempt} failed: {e}")
+    diag_log("Bot 0 retry exhausted after 10 attempts — continuing without main bot")
 
 
 async def stop_telegram_client():

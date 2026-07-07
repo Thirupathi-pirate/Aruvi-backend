@@ -31,27 +31,15 @@ def _get_media(message):
 
 
 def _get_upload_location(file_id_obj, thumb_size=""):
-    """Create appropriate Input*FileLocation based on decoded file type."""
-    ft = file_id_obj.file_type
-    if ft == FileType.VIDEO:
-        return raw.types.InputVideoFileLocation(
-            id=file_id_obj.media_id,
-            access_hash=file_id_obj.access_hash,
-            file_reference=file_id_obj.file_reference,
-        )
-    elif ft in (FileType.AUDIO, FileType.VOICE):
-        return raw.types.InputAudioFileLocation(
-            id=file_id_obj.media_id,
-            access_hash=file_id_obj.access_hash,
-            file_reference=file_id_obj.file_reference,
-        )
-    else:
-        return raw.types.InputDocumentFileLocation(
-            id=file_id_obj.media_id,
-            access_hash=file_id_obj.access_hash,
-            file_reference=file_id_obj.file_reference,
-            thumb_size=thumb_size or "",
-        )
+    """Create InputDocumentFileLocation for the decoded file.
+    Pyrogram internally uses InputDocumentFileLocation for all
+    non-photo file types (video, audio, document, voice, etc.)."""
+    return raw.types.InputDocumentFileLocation(
+        id=file_id_obj.media_id,
+        access_hash=file_id_obj.access_hash,
+        file_reference=file_id_obj.file_reference,
+        thumb_size=thumb_size or "",
+    )
 
 
 class ChunkCache:

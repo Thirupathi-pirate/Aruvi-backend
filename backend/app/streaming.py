@@ -521,10 +521,10 @@ async def parallel_stream_generator(
         return current - 1 == batch_end
 
     async def _fetch_batch_with_timeout(batch_start, batch_end, cl, msg, sem):
-        """_fetch_batch with a 10s watchdog — races unresolved chunks via alt clients."""
+        """_fetch_batch with a 30s watchdog — races unresolved chunks via alt clients."""
         async def _watchdog(main_task):
             try:
-                await asyncio.sleep(10)
+                await asyncio.sleep(30)
                 if not main_task.done():
                     unresolved = [
                         co for co in range(batch_start, batch_end + 1)
@@ -691,11 +691,12 @@ async def parallel_stream_generator(
 
     # ── Backpressure: cap in-flight resolved chunks ─────────────────
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
-    # Prevents OOM for huge files (>3 GB) where all 3584+ futures
-    # would otherwise fill RAM before the tunnel can drain them.
-    # 200 MB window + 100 MB cache + 700 MB app base ≈ 1 GB peak,
-    # well within the 1.8 GB headroom on 3.3 GB RAM server.
-    WINDOW_CHUNKS = 200
+    # Must be > 14 * BATCH_SIZE (14 workers × 15 = 210) so workers
+    # can complete their first batch round without stalling. Higher
+    # values absorb slow-batch jitter (10-20s) without cascading stalls.
+    # 700 MB window + 100 MB cache + 700 MB app base ≈ 1.5 GB peak,
+    # leaving 1.8 GB headroom on 3.3 GB RAM server.
+    WINDOW_CHUNKS = 700
     _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
 
     # ── Yield smoothing: prebuffer before yielding ─────────────────────

@@ -48,12 +48,18 @@ _proxy_kwargs = {}
 if settings.mt_proxy_url:
     from urllib.parse import urlparse
     p = urlparse(settings.mt_proxy_url)
-    _proxy_kwargs["proxy"] = dict(
-        scheme=p.scheme,
-        hostname=p.hostname,
+    proxy_cfg = dict(
+        scheme=p.scheme or "socks5",
+        hostname=p.hostname or "127.0.0.1",
         port=p.port or 1080,
     )
-    diag_log(f"Using MT proxy: {p.hostname}:{p.port or 1080}")
+    if p.username:
+        proxy_cfg["username"] = p.username
+    if p.password:
+        proxy_cfg["password"] = p.password
+    _proxy_kwargs["proxy"] = proxy_cfg
+    auth = f"{p.username}@{p.hostname}" if p.username else p.hostname
+    diag_log(f"Using MT proxy: {auth}:{p.port or 1080}")
 else:
     diag_log("No MT proxy set — connecting directly to Telegram DCs")
 

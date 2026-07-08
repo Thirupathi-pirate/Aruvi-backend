@@ -1,0 +1,39 @@
+version: "3.9"
+
+services:
+  socks5:
+    image: serjs/go-socks5-proxy:latest
+    container_name: aruvi-socks5
+    restart: unless-stopped
+    environment:
+      PROXY_USER: telegram
+      PROXY_PASSWORD: REDACTED_PROXY_PASSWORD
+    ports:
+      - "1080:1080"
+    networks:
+      - aruvi-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: aruvi-backend
+    restart: unless-stopped
+    depends_on:
+      - socks5
+    env_file:
+      - .env
+    environment:
+      MT_PROXY_URL: socks5://telegram:REDACTED_PROXY_PASSWORD@socks5:1080
+      SERVER_PORT: "7446"
+    ports:
+      - "7446:7446"
+    volumes:
+      - ./data:/app/data
+      - ./session:/app/session
+    networks:
+      - aruvi-net
+
+networks:
+  aruvi-net:
+    driver: bridge

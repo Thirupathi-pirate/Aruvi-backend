@@ -14,6 +14,7 @@ from pyrogram import filters
 from pyrogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from sqlalchemy import select, func, update
 
+from .patch import ListenerCanceled
 from .telegram import tg_client, forward_to_storage_channel, invalidate_message_cache
 from .database import async_session
 from .models import User, File, Folder, LoginCode
@@ -815,6 +816,8 @@ async def handle_callback(client, callback: CallbackQuery):
             
         except asyncio.TimeoutError:
             await callback.message.reply("⏱ Timed out. Please try again.")
+        except ListenerCanceled:
+            await callback.message.reply("❌ Cancelled.")
         except Exception as e:
             await callback.message.reply(f"❌ Error: {str(e)}")
 
@@ -868,6 +871,8 @@ async def handle_callback(client, callback: CallbackQuery):
                     
         except asyncio.TimeoutError:
             await callback.message.reply("⏱ Timed out. Please try again.")
+        except ListenerCanceled:
+            await callback.message.reply("❌ Cancelled.")
     
     elif data.startswith("delfile:"):
         file_id = int(data.split(":")[1])
@@ -976,6 +981,8 @@ async def handle_callback(client, callback: CallbackQuery):
                     
         except asyncio.TimeoutError:
             await callback.message.reply("⏱ Timed out. Please try again.")
+        except ListenerCanceled:
+            await callback.message.reply("❌ Cancelled.")
 
     elif data.startswith("delfolder:"):
         folder_id = int(data.split(":")[1])
@@ -1273,6 +1280,8 @@ async def handle_callback(client, callback: CallbackQuery):
 
         except asyncio.TimeoutError:
             await callback.message.reply("⏱ Timed out. Please try again.")
+        except ListenerCanceled:
+            await callback.message.reply("❌ Cancelled.")
         except Exception as e:
             await callback.message.reply(f"❌ Error: {str(e)}")
 

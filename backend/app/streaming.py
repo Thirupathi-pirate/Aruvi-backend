@@ -769,10 +769,10 @@ async def parallel_stream_generator(
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
             del results[chunk_idx]
     finally:
-        # Break all references to chunk data before releasing forward stream
-        results.clear()
+        # Cancel workers first, then clear results (avoids KeyError race)
         for w in worker_tasks:
             w.cancel()
+        results.clear()
         _forward_streams.pop(message_id, None)
         # Schedule restart when no streams remain — frees page cache
         if not _forward_streams:

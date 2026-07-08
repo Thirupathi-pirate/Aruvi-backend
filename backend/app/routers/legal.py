@@ -46,7 +46,7 @@ PAGE_TPL = """\
 {nav}
 {content}
 <hr>
-<p class="foot">Hosted on <a href="https://www.hidencloud.com/">HidenCloud</a> · No data collected · {year}</p>
+<p class="foot">Hosted on <a href="https://huggingface.co/spaces/wpbtvr/teleplay-backend">HF Spaces</a> · No data collected · {year}</p>
 </div>
 </body>
 </html>"""
@@ -72,7 +72,7 @@ PRIVACY_CONTENT = """\
 
 <h2>Where Data Lives</h2>
 <ul>
-<li>The service runs on <a href="https://www.hidencloud.com/">HidenCloud</a> infrastructure.</li>
+<li>The service runs on <a href="https://www.hidencloud.com/">HF Spaces</a> infrastructure.</li>
 <li>Files are streamed directly from Telegram — we do not host or store them.</li>
 <li>Google Drive uploads go directly from Telegram to your personal Drive — we never see your files.</li>
 </ul>
@@ -81,7 +81,7 @@ PRIVACY_CONTENT = """\
 <ul>
 <li><strong>Telegram</strong> — file storage and delivery.</li>
 <li><strong>Google Drive</strong> — only if you opt in to upload.</li>
-<li><strong>HidenCloud</strong> — server hosting provider.</li>
+<li><strong>HF Spaces</strong> — server hosting provider.</li>
 </ul>
 
 <h2>Contact</h2>
@@ -107,7 +107,7 @@ TERMS_CONTENT = """\
 <p>The service is provided "as is" without any warranty. We are not liable for any damages arising from its use.</p>
 
 <h2>Third-Party Services</h2>
-<p>Telegram, Google Drive, and HidenCloud have their own terms that apply to your use of their platforms.</p>
+<p>Telegram, Google Drive, and HF Spaces have their own terms that apply to your use of their platforms.</p>
 
 <h2>Changes</h2>
 <p>We may update these terms at any time. Continued use after changes constitutes acceptance.</p>

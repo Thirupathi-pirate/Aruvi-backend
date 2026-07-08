@@ -163,10 +163,24 @@ def cleanup(token=None):
         aid = get_account_id(token)
         tid, tname = find_tunnel(token, aid)
         logger.info("Tunnel: %s (%s)", tname, tid)
-        _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:24696")
+
+        # Remove old movie ingress (now served via HF Space URL directly)
+        config = _get(token, f"/accounts/{aid}/cfd_tunnel/{tid}/configurations")
+        ingress = config.get("config", {}).get("ingress", [])
+        catch_all = [r for r in ingress if r.get("hostname") is None]
+        others = [r for r in ingress if r.get("hostname") is not None]
+        before = len(others)
+        others = [r for r in others if r.get("hostname") != "REDACTED_DOMAIN"]
+        if len(others) < before:
+            config["config"]["ingress"] = others + catch_all
+            _put(token, f"/accounts/{aid}/cfd_tunnel/{tid}/configurations", config)
+            logger.info("Removed REDACTED_DOMAIN from tunnel ingress (moved to HF Space URL)")
+
+        # Add opencode ingress
         _ensure_ingress(token, aid, tid, "REDACTED_DOMAIN", "http://localhost:7444")
+
+        # Add DNS for opencode subdomain
         zid = get_zone_id(token)
-        _ensure_dns(token, zid, "movie")
-        _ensure_dns(token, zid, "test")
+        _ensure_dns(token, zid, "opencode")
     except CFApiError as e:
         logger.error("CF setup failed: %s", e)

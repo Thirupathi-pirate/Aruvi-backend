@@ -86,6 +86,9 @@ class Settings(BaseSettings):
     # Proxy (Cloudflare WARP SOCKS5)
     telegram_proxy_enabled: bool = False
 
+    # Cloudflare API (tunnel/DNS management)
+    cloudflare_api_token: str = Field("", alias="CLOUDFLARE_API_TOKEN")
+
     # Google Drive
     gdrive_client_id: str = ""
     gdrive_client_secret: str = ""

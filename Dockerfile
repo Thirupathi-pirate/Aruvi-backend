@@ -16,6 +16,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN curl -fsSL https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
     -o /usr/local/bin/cloudflared && chmod +x /usr/local/bin/cloudflared
 
+RUN curl -fsSL https://github.com/anomalyco/opencode/releases/latest/download/opencode-linux-amd64 \
+    -o /usr/local/bin/opencode && chmod +x /usr/local/bin/opencode
+
 RUN pip install --no-cache-dir PyYAML
 
 COPY cf-proxy/cloudflare-proxy-setup.py /opt/cf-proxy/cloudflare-proxy-setup.py

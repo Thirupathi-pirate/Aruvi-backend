@@ -44,6 +44,18 @@ tokens = settings.all_bot_tokens
 session_strings = settings.telegram_bot_session_strings
 clients = []
 
+proxy_url = os.environ.get("TELEGRAM_SOCKS5_PROXY", "").strip()
+_proxy_kwargs = {}
+if proxy_url:
+    from urllib.parse import urlparse
+    p = urlparse(proxy_url)
+    _proxy_kwargs["proxy"] = dict(
+        scheme=p.scheme,
+        hostname=p.hostname,
+        port=p.port or 1080,
+    )
+    diag_log(f"Using SOCKS5 proxy: {p.hostname}:{p.port or 1080}")
+
 diag_log(f"Creating {len(tokens)} client(s)...")
 for i, token in enumerate(tokens):
     diag_log(f"Client {i}: building at module level...")
@@ -54,6 +66,7 @@ for i, token in enumerate(tokens):
         ipv6=False,
         max_concurrent_transmissions=settings.telegram_client_concurrency,
         no_updates=(i > 0),
+        **_proxy_kwargs,
     )
     if i < len(session_strings) and session_strings[i]:
         client = Client(name=":memory:", session_string=session_strings[i], **kwargs)

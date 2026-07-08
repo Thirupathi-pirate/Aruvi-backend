@@ -21,6 +21,15 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ] && [ -f /opt/cf-proxy/cloudflare-proxy.js 
     echo "Cloudflare proxy active via NODE_OPTIONS"
 fi
 
+if [ -n "${TUNNEL_TOKEN:-}" ]; then
+    echo "Starting cloudflared SOCKS5 proxy..."
+    cloudflared tunnel --socks5 localhost:1080 --token "$TUNNEL_TOKEN" \
+        2>&1 | sed 's/^/[cloudflared] /' &
+    sleep 3
+    export TELEGRAM_SOCKS5_PROXY="socks5://localhost:1080"
+    echo "cloudflared SOCKS5 active on localhost:1080"
+fi
+
 if [ -z "${APP_START_CMD:-}" ]; then
     echo "ERROR: APP_START_CMD not set"
     exit 1

@@ -22,19 +22,13 @@ if [ -n "${CLOUDFLARE_PROXY_URL:-}" ] && [ -f /opt/cf-proxy/cloudflare-proxy.js 
     echo "Cloudflare proxy active via NODE_OPTIONS"
 fi
 
-# --- cloudflared: SOCKS5 for MTProto outbound + ingress for opencode ---
+# --- cloudflared: tunnel ingress for opencode only (NO SOCKS5 - TOS compliant) ---
 if [ -n "${TUNNEL_TOKEN:-}" ]; then
-    echo "Starting cloudflared SOCKS5 proxy..."
-    cloudflared tunnel --socks5 localhost:1080 --token "$TUNNEL_TOKEN" \
-        2>&1 | sed 's/^/[cloudflared-socks5] /' &
-
     echo "Starting cloudflared tunnel connector (ingress for opencode)..."
     cloudflared tunnel run --token "$TUNNEL_TOKEN" \
         2>&1 | sed 's/^/[cloudflared-ingress] /' &
 
-    sleep 5
-    export TELEGRAM_SOCKS5_PROXY="socks5://localhost:1080"
-    echo "cloudflared SOCKS5 active on localhost:1080"
+    sleep 3
     echo "cloudflared tunnel ingress connector running"
 else
     echo "TUNNEL_TOKEN not set — skipping cloudflared"

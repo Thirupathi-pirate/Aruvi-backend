@@ -44,17 +44,18 @@ tokens = settings.all_bot_tokens
 session_strings = settings.telegram_bot_session_strings
 clients = []
 
-proxy_url = os.environ.get("TELEGRAM_SOCKS5_PROXY", "").strip()
 _proxy_kwargs = {}
-if proxy_url:
+if settings.mt_proxy_url:
     from urllib.parse import urlparse
-    p = urlparse(proxy_url)
+    p = urlparse(settings.mt_proxy_url)
     _proxy_kwargs["proxy"] = dict(
         scheme=p.scheme,
         hostname=p.hostname,
         port=p.port or 1080,
     )
-    diag_log(f"Using SOCKS5 proxy: {p.hostname}:{p.port or 1080}")
+    diag_log(f"Using MT proxy: {p.hostname}:{p.port or 1080}")
+else:
+    diag_log("No MT proxy set — connecting directly to Telegram DCs")
 
 diag_log(f"Creating {len(tokens)} client(s)...")
 for i, token in enumerate(tokens):

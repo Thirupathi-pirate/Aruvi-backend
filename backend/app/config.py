@@ -83,8 +83,8 @@ class Settings(BaseSettings):
     telegram_connect_timeout: int = 30
     telegram_timeout: int = 60
 
-    # Proxy (Cloudflare WARP SOCKS5)
-    telegram_proxy_enabled: bool = False
+    # Optional MTProto proxy (socks5:// or http://). Empty = direct connection (TOS-compliant on HF Spaces)
+    mt_proxy_url: str = Field("", alias="MT_PROXY_URL")
 
     # Cloudflare API (tunnel/DNS management)
     cloudflare_api_token: str = Field("", alias="CLOUDFLARE_API_TOKEN")

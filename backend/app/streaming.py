@@ -2,27 +2,13 @@
 Custom streaming utilities for Telegram media files.
 Multi-client parallel streaming for maximum download speed.
 """
-import ctypes
-import gc
 import asyncio
 import re
 import time
 import logging
 from typing import AsyncGenerator
 
-BATCH_SIZE = 15  # chunks per stream_media call (fewer RPCs = faster)
-
-
-def _trim_memory():
-    """Force Python's allocator to return free pages to the OS.
-    After large streams, pymalloc arenas hold freed memory that
-    isn't reclaimed. This calls gc.collect() + malloc_trim()."""
-    gc.collect()
-    try:
-        libc = ctypes.CDLL("libc.so.6")
-        libc.malloc_trim(0)
-    except Exception:
-        pass
+BATCH_SIZE = 10  # chunks per stream_media call
 
 
 def _get_media(message):
@@ -47,7 +33,7 @@ class ChunkCache:
     Key: chunk_idx -> bytes
     Max size: 200MB per video, evicts oldest entries when full.
     """
-    def __init__(self, max_bytes: int = 100 * 1024 * 1024):
+    def __init__(self, max_bytes: int = 200 * 1024 * 1024):
         self._data: dict[int, bytes] = {}
         self._order: list[int] = []
         self._size = 0
@@ -107,7 +93,7 @@ class CacheManager:
     Each (chat_id, message_id) pair gets its own 200MB FIFO cache,
     so concurrent streams don't evict each other's backward seek data.
     """
-    def __init__(self, per_video_max: int = 100 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 200 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
 
@@ -194,8 +180,7 @@ def _do_restart():
     _pending_restart = None
     _forward_streams.clear()
     freed = _cache_manager.clear_all()
-    _trim_memory()
-    logger.warning("No active streams — cleared %.1f MB from cache, memory trimmed", freed / 1024 / 1024)
+    logger.warning("No active streams — cleared %.1f MB from cache", freed / 1024 / 1024)
 
 def _schedule_restart(delay: float = 15.0):
     global _pending_restart
@@ -723,12 +708,9 @@ async def parallel_stream_generator(
 
     # ── Backpressure: cap in-flight resolved chunks ─────────────────
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
-    # Must be > 14 * BATCH_SIZE (14 workers × 15 = 210) so workers
-    # can complete their first batch round without stalling. Higher
-    # values absorb slow-batch jitter (10-20s) without cascading stalls.
-    # 350 MB window + 100 MB cache + 700 MB app base ≈ 1.15 GB peak per stream.
-    # 5 concurrent: 5 × 350 = 1.75 GB + 0.7 GB base = 2.45 GB (74% of 3.3 GB).
-    WINDOW_CHUNKS = 350
+    # 300 MB window + 200 MB cache = 500 MB peak per stream.
+    # 5 concurrent: 5 × 500 = 2.5 GB (16% of 16 GB).
+    WINDOW_CHUNKS = 300
     _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
 
     # Launch workers
@@ -792,7 +774,6 @@ async def parallel_stream_generator(
         for w in worker_tasks:
             w.cancel()
         _forward_streams.pop(message_id, None)
-        _trim_memory()
         # Schedule restart when no streams remain — frees page cache
         if not _forward_streams:
             _schedule_restart()

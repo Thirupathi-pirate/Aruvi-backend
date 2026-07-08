@@ -1,12 +1,9 @@
 """
 FastAPI main application with Telegram MTProto client lifecycle.
 """
-import ctypes
-import gc
 import asyncio
 import logging
 import os
-import time
 from contextlib import asynccontextmanager
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -19,7 +16,7 @@ from .config import get_settings
 from .database import init_db
 from .rate_limit import limiter
 from .telegram import start_telegram_client, stop_telegram_client
-from .status import get_status, attach_ring_handler, clear_logs, _discover_cgroup_memory
+from .status import get_status, attach_ring_handler, clear_logs
 
 from .routers import files_router, folders_router, streaming_router, auth_router, tv_router, admin_router, gdrive_router, legal_router, diagnostic_router
 
@@ -31,46 +28,6 @@ logging.getLogger("pyrogram.dispatcher").setLevel(logging.WARNING)
 logger = logging.getLogger(__name__)
 
 settings = get_settings()
-
-
-async def _clear_cache_4h():
-    """Clear in-memory chunk cache every 4 hours. Preserves caches for active streams."""
-    while True:
-        await asyncio.sleep(4 * 3600)
-        from .streaming import _cache_manager as cm, _forward_streams as fs
-        active = {(info["chat_id"], mid) for mid, info in fs.items()}
-        freed = cm.clear_all(exclude_keys=active)
-        kept = len(active)
-        logger.info("Chunk cache cleared: freed %.1f MB (%d active streams preserved)", freed / 1024 / 1024, kept)
-
-_last_oom_clear = 0.0
-_OOM_CLEAR_COOLDOWN = 60
-
-
-async def _oom_guard_30s():
-    """Background OOM guard: clear in-memory caches when RAM exceeds 80%."""
-    global _last_oom_clear
-    while True:
-        await asyncio.sleep(30)
-        try:
-            cur, mx = _discover_cgroup_memory()
-            now = time.monotonic()
-            if cur is not None and mx is not None and cur > 0.8 * mx and now - _last_oom_clear > _OOM_CLEAR_COOLDOWN:
-                _last_oom_clear = now
-                from .streaming import _cache_manager as cm, _forward_streams as fs
-                active = {(info["chat_id"], mid) for mid, info in list(fs.items())}
-                freed = cm.clear_all(exclude_keys=active)
-                kept = len(active)
-                gc.collect()
-                try:
-                    libc = ctypes.CDLL("libc.so.6")
-                    libc.malloc_trim(0)
-                except Exception:
-                    pass
-                logger.warning("OOM guard: freed %.1f MB cache, trimmed heap (%d active)",
-                               freed / 1024 / 1024, kept)
-        except Exception:
-            pass
 
 
 @asynccontextmanager
@@ -85,19 +42,13 @@ async def lifespan(app: FastAPI):
 
     # Start background cleanup  
     cleanup_task = asyncio.create_task(_cleanup_expired_codes())
-    cache_clear_task = asyncio.create_task(_clear_cache_4h())
-    oom_task = asyncio.create_task(_oom_guard_30s())
     
     yield
     
     cleanup_task.cancel()
-    cache_clear_task.cancel()
-    oom_task.cancel()
     startup_task.cancel()
     try:
         await cleanup_task
-        await cache_clear_task
-        await oom_task
         await startup_task
     except asyncio.CancelledError:
         pass

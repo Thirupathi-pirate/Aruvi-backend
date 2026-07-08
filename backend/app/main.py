@@ -233,6 +233,47 @@ async def diagnostic(request: Request):
     }
 
 
+@app.get("/api/diag/bot-test")
+async def diag_bot_test(request: Request):
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {settings.debug_password}":
+        raise HTTPException(status_code=401, detail="Invalid debug token")
+    from .telegram import tg_client, clients
+    from pyrogram import handlers
+    import inspect
+    result = {
+        "client_connected": tg_client.is_connected if tg_client else False,
+        "client_initialized": tg_client.is_initialized if tg_client else False,
+        "dispatcher_workers": len(tg_client.dispatcher.handler_worker_tasks) if tg_client else 0,
+    }
+    # Count registered handlers
+    handler_counts = {}
+    for group, hs in tg_client.dispatcher.groups.items():
+        handler_counts[str(group)] = [
+            {"type": type(h).__name__, "callback": h.callback.__name__ if inspect.isfunction(h.callback) else str(h.callback)[:50]}
+            for h in hs
+        ]
+    result["handler_groups"] = handler_counts
+    # Try sending a test message to the bot's own chat (diagnostic)
+    try:
+        me = await tg_client.get_me()
+        result["bot_username"] = me.username
+        result["bot_id"] = me.id
+    except Exception as e:
+        result["get_me_error"] = str(e)
+    # List session info
+    try:
+        dc_id = await tg_client.storage.dc_id()
+        result["dc_id"] = dc_id
+        is_bot = await tg_client.storage.is_bot()
+        result["is_bot"] = is_bot
+        user_id = await tg_client.storage.user_id()
+        result["user_id"] = user_id
+    except Exception as e:
+        result["storage_error"] = str(e)
+    return result
+
+
 @app.get("/api/v")
 async def api_v():
     return {"v": 2, "commit": "33c4c1a57a7a"}

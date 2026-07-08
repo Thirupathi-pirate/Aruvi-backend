@@ -1,6 +1,17 @@
+---
+title: Aruvi Backend
+emoji: 🎬
+colorFrom: blue
+colorTo: purple
+sdk: docker
+app_port: 7860
+pinned: false
+license: mit
+---
+
 # Aruvi — Telegram Media Streaming Platform
 
-[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/Thirupathi-pirate/aruvi-backend)
+[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/Tiraaruvi/aruvi-backend)
 
 Stream your Telegram media files (videos, audio) to any browser or Android TV using multi-bot parallel streaming with intelligent caching.
 

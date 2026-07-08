@@ -155,20 +155,7 @@ async def health():
         "client_connected": tg_client.is_connected if tg_client else False,
     }
 
-@app.post("/api/restart")
-async def api_restart():
-    """Restart Telegram clients, clear caches, then exit for fresh container (pulls new code)."""
-    from .streaming import _cache_manager, _forward_streams, _cancel_restart
-    from .telegram import stop_all_clients
 
-    _cancel_restart()
-    _forward_streams.clear()
-    freed = _cache_manager.clear_all()
-    logger.warning("Restarting Telegram clients (cache cleared: %.1f MB)...", freed / 1024 / 1024)
-    await stop_all_clients()
-    logger.warning("Clients stopped — exiting for fresh container in 1s")
-    asyncio.get_event_loop().call_later(1, os._exit, 0)
-    return {"status": "ok", "cleared_mb": round(freed / 1024 / 1024, 1)}
 
 @app.get("/diag")
 async def diagnostic(request: Request):

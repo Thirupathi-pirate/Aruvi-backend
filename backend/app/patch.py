@@ -120,6 +120,7 @@ class PatchedClient(PyroClient):
         retries: int = session.Session.MAX_RETRIES,
         timeout: float = session.Session.WAIT_TIMEOUT,
         sleep_threshold: float = None,  # type: ignore
+        **kwargs,
     ):
         try:
             res = await super().invoke(
@@ -127,6 +128,7 @@ class PatchedClient(PyroClient):
                 retries=retries,
                 timeout=timeout,
                 sleep_threshold=sleep_threshold,
+                **kwargs,
             )
             return res
         except errors.FloodWait as e:
@@ -137,6 +139,7 @@ class PatchedClient(PyroClient):
                 retries=retries,
                 timeout=timeout,
                 sleep_threshold=sleep_threshold,
+                **kwargs,
             )
                     
 async def resolve_listener(

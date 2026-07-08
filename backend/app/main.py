@@ -246,7 +246,6 @@ async def diag_bot_test(request: Request):
         "client_initialized": tg_client.is_initialized if tg_client else False,
         "dispatcher_workers": len(tg_client.dispatcher.handler_worker_tasks) if tg_client else 0,
     }
-    # Count registered handlers
     handler_counts = {}
     for group, hs in tg_client.dispatcher.groups.items():
         handler_counts[str(group)] = [
@@ -254,14 +253,12 @@ async def diag_bot_test(request: Request):
             for h in hs
         ]
     result["handler_groups"] = handler_counts
-    # Try sending a test message to the bot's own chat (diagnostic)
     try:
         me = await tg_client.get_me()
         result["bot_username"] = me.username
         result["bot_id"] = me.id
     except Exception as e:
         result["get_me_error"] = str(e)
-    # List session info
     try:
         dc_id = await tg_client.storage.dc_id()
         result["dc_id"] = dc_id
@@ -272,6 +269,21 @@ async def diag_bot_test(request: Request):
     except Exception as e:
         result["storage_error"] = str(e)
     return result
+
+
+@app.get("/api/diag/bot-send")
+async def diag_bot_send(request: Request, chat_id: int = 0):
+    auth = request.headers.get("Authorization", "")
+    if auth != f"Bearer {settings.debug_password}":
+        raise HTTPException(status_code=401, detail="Invalid debug token")
+    if not chat_id:
+        return {"error": "pass ?chat_id=YOUR_TELEGRAM_ID"}
+    from .telegram import tg_client
+    try:
+        msg = await tg_client.send_message(chat_id, "🧪 Bot test message — if you see this, sending works!")
+        return {"sent": True, "message_id": msg.id}
+    except Exception as e:
+        return {"sent": False, "error": str(e)}
 
 
 @app.get("/api/v")

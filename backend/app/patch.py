@@ -188,6 +188,7 @@ class Client(PatchedClient):
         # Fix loop capture: Pyrogram's __init__ captures asyncio.get_event_loop()
         # at import time (wrong loop under uvicorn). Sync to the running loop.
         self.loop = asyncio.get_running_loop()
+        self.dispatcher.loop = self.loop
         if not self._listeners_registered:
             self.add_handler(handlers.CallbackQueryHandler(resolve_listener), group=-1)
             self.add_handler(handlers.InlineQueryHandler(resolve_listener), group=-1)

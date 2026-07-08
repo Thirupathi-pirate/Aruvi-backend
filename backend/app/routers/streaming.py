@@ -199,11 +199,13 @@ async def stream_file(
     from urllib.parse import quote
     encoded_filename = quote(file.file_name)
 
+    content_length = until_bytes - from_bytes + 1
     headers = {
         "Content-Type": mime_type,
         "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
         "Accept-Ranges": "bytes",
         "Cache-Control": "public, max-age=86400",
+        "Content-Length": str(content_length),
     }
     if range_header:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
@@ -360,11 +362,13 @@ async def stream_public_file(
     from urllib.parse import quote
     encoded_filename = quote(file.file_name)
 
+        content_length = until_bytes - from_bytes + 1
     headers = {
         "Content-Type": mime_type,
         "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",
         "Accept-Ranges": "bytes",
         "Cache-Control": "public, max-age=86400",
+        "Content-Length": str(content_length),
     }
     if range_header:
         headers["Content-Range"] = f"bytes {from_bytes}-{until_bytes}/{file_size}"
@@ -375,3 +379,6 @@ async def stream_public_file(
         media_type=mime_type,
         headers=headers
     )
+
+
+

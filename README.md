@@ -1,5 +1,7 @@
 # Aruvi — Telegram Media Streaming Platform
 
+[![Hugging Face Spaces](https://img.shields.io/badge/%F0%9F%A4%97-Hugging%20Face%20Spaces-blue)](https://huggingface.co/spaces/Thirupathi-pirate/aruvi-backend)
+
 Stream your Telegram media files (videos, audio) to any browser or Android TV using multi-bot parallel streaming with intelligent caching.
 
 ## Architecture
@@ -32,9 +34,11 @@ Browser/TV App → Cloudflare Tunnel → FastAPI (uvicorn) → PyroTGFork client
 5. **100MB lookahead** — maintains cushion against Telegram latency spikes
 6. **Global OOM guard** — evicts farthest chunks across all streams at 500MB
 
-## Deployment
+## Deployments
 
-Deployed on **HidenCloud** (3GB ARM64, 15GB NVMe). Accessible via Cloudflare Tunnel:
+### HidenCloud (current)
+
+3GB ARM64, 15GB NVMe. Accessible via Cloudflare Tunnel:
 
 | Domain | Service |
 |--------|---------|
@@ -42,15 +46,13 @@ Deployed on **HidenCloud** (3GB ARM64, 15GB NVMe). Accessible via Cloudflare Tun
 | `REDACTED_DOMAIN` | opencode Web UI (debug) |
 | `monitor.aaruvi.space` | Status dashboard |
 
-### Bootstrap
-
 ```bash
 # HidenCloud runs: python /home/container/run.py
-# Which clones this repo fresh on every restart:
+# Fresh git clone on every restart:
 git clone https://github.com/Thirupathi-pirate/Aruvi-backend.git code/repo
 ```
 
-`.env` (persistent, not in git):
+`.env`:
 ```
 TELEGRAM_API_ID=
 TELEGRAM_API_HASH=
@@ -61,9 +63,30 @@ DATABASE_URL=postgresql+asyncpg://...
 TUNNEL_TOKEN=
 ```
 
-### Daily Restart
+Daily exit at 3:30 AM IST — fresh IP on restart.
 
-Process exits at 3:30 AM IST — HidenCloud auto-restarts with fresh IP.
+### Hugging Face Spaces (migrating)
+
+Deployed via Docker:
+
+```bash
+docker build -t aruvi-backend .
+docker run -p 7860:7860 \
+  -e TELEGRAM_API_ID=... \
+  -e TELEGRAM_API_HASH=... \
+  -e TELEGRAM_BOT_TOKEN=... \
+  -e TELEGRAM_STORAGE_CHANNEL_ID=... \
+  aruvi-backend
+```
+
+Env vars specific to HF Spaces:
+
+| Variable | Required | Notes |
+|----------|----------|-------|
+| `CLOUDFLARE_WORKERS_TOKEN` | no | Auto-deploys CF Worker proxy for `api.telegram.org` |
+| `CLOUDFLARE_PROXY_URL` | no | Pre-existing proxy URL (skip auto-setup) |
+| `CLOUDFLARE_PROXY_SECRET` | no | Shared secret for proxy auth |
+| `APP_START_CMD` | no | Default: `uvicorn app.main:app --host 0.0.0.0 --port 7860` |
 
 ## Key Design Decisions
 
@@ -76,12 +99,12 @@ Process exits at 3:30 AM IST — HidenCloud auto-restarts with fresh IP.
 
 ## Tech Stack
 
-- **Backend**: Python 3.13, FastAPI, SQLAlchemy async, PyroTGFork
+- **Backend**: Python 3.11, FastAPI, SQLAlchemy async, Kurigram (Pyrogram fork)
 - **Database**: PostgreSQL (Supabase) or SQLite
 - **Cache**: In-memory + NVMe disk with 3h TTL
-- **Tunnel**: Cloudflare Tunnel (cloudflared ARM64 binary)
+- **Tunnel**: Cloudflare Tunnel (cloudflared) + Cloudflare Workers proxy
 - **Frontend**: React (pre-built, served as static files)
-- **Platform**: HidenCloud ARM64 container
+- **Platform**: HidenCloud ARM64 container / Hugging Face Spaces
 
 ## License
 

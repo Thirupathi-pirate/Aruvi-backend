@@ -45,7 +45,11 @@ session_strings = settings.telegram_bot_session_strings
 clients = []
 
 _proxy_kwargs = {}
-if settings.mt_proxy_url:
+# HF Spaces sets SPACE_ID — Telegram DCs are reachable directly there
+_on_hf = bool(os.environ.get("SPACE_ID"))
+if _on_hf and settings.mt_proxy_url:
+    diag_log("HF Space detected — ignoring MT_PROXY_URL, connecting directly")
+elif settings.mt_proxy_url:
     from urllib.parse import urlparse
     p = urlparse(settings.mt_proxy_url)
     proxy_cfg = dict(

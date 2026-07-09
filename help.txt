@@ -25,7 +25,7 @@
 - Need to run manually to see errors: `cd ~/code && npx @grinev/opencode-telegram-bot@latest`
 
 ## Env vars needed in ~/code/.env
-- OPENCODE_BOT_TOKEN=REDACTED_BOT_TOKEN
+- OPENCODE_BOT_TOKEN=<your-opencode-bot-token>
 - OPENCODE_BOT_USER_ID=REDACTED_USER_ID
 - CLOUDFLARE_API_TOKEN=...
 - TUNNEL_TOKEN=...

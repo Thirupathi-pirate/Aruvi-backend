@@ -362,7 +362,7 @@ async def stream_public_file(
     from urllib.parse import quote
     encoded_filename = quote(file.file_name)
 
-        content_length = until_bytes - from_bytes + 1
+    content_length = until_bytes - from_bytes + 1
     headers = {
         "Content-Type": mime_type,
         "Content-Disposition": f"{disposition}; filename*=utf-8''{encoded_filename}",

@@ -7,6 +7,7 @@ import re
 import time
 import logging
 from typing import AsyncGenerator
+from contextlib import asynccontextmanager
 
 BATCH_SIZE = 10  # chunks per stream_media call
 
@@ -236,6 +237,98 @@ _client_semaphores = {}
 # Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
 # With LIMIT=10, max in-flight = 10 × 2 GB = 20 GB, within 3 GB cgroup with OOM guard.
 _stream_semaphore = asyncio.Semaphore(5)
+class ClientPoolEmpty(Exception):
+    """No connected client available in the pool."""
+    pass
+
+
+class ClientPool:
+    """Weighted-least-loaded client assignment pool.
+
+    Tracks active workers, success rate (EMA), and flood-wait cooldown
+    per client. Assigns by highest score: connected(+100) - active(x10)
+    - remaining_cooldown(x100) - (1-success_rate)(x50).
+    """
+
+    def __init__(self, clients: list):
+        self._clients = clients
+        self._active: dict[int, int] = {}
+        self._cooldown: dict[int, float] = {}  # monotonic deadline
+        self._success: dict[int, float] = {}  # EMA success rate
+        self._lock = asyncio.Lock()
+
+    def _get_active(self, idx: int) -> int:
+        return self._active.get(idx, 0)
+
+    def _score(self, idx: int) -> float:
+        client = self._clients[idx]
+        if not client.is_connected:
+            return 0.0
+        score = 100.0  # base for being connected
+        score -= self._get_active(idx) * 10.0
+        remaining = max(0, self._cooldown.get(idx, 0) - time.monotonic())
+        score -= remaining * 100.0  # heavy penalty while in cooldown
+        score -= (1 - self._success.get(idx, 0.5)) * 50.0
+        return max(score, 1.0)  # keep barely-positive so it's available
+
+    async def acquire(self, timeout: float = 30.0):
+        """Acquire the best available client. Raises ClientPoolEmpty if none."""
+        deadline = time.monotonic() + timeout
+        while True:
+            async with self._lock:
+                best_idx = -1
+                best_score = -1.0
+                for i in range(len(self._clients)):
+                    s = self._score(i)
+                    if s > best_score:
+                        best_score = s
+                        best_idx = i
+                if best_idx >= 0 and best_score > 0:
+                    self._active[best_idx] = self._get_active(best_idx) + 1
+                    return self._clients[best_idx], best_idx
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise ClientPoolEmpty("No connected client available")
+            await asyncio.sleep(min(0.5, remaining))
+
+    async def release(self, idx: int):
+        async with self._lock:
+            current = self._get_active(idx)
+            if current > 0:
+                self._active[idx] = current - 1
+
+    def report_success(self, idx: int):
+        rate = self._success.get(idx, 0.5)
+        # EMA: alpha=0.3
+        self._success[idx] = 0.3 * 1.0 + 0.7 * rate
+
+    def report_failure(self, idx: int, flood_wait: int = 0):
+        rate = self._success.get(idx, 0.5)
+        self._success[idx] = 0.3 * 0.0 + 0.7 * rate
+        if flood_wait > 0:
+            deadline = time.monotonic() + min(max(flood_wait * 2, 30), 300)
+            existing = self._cooldown.get(idx, 0)
+            # Don't shorten existing cooldown
+            if existing < deadline:
+                self._cooldown[idx] = deadline
+
+    @asynccontextmanager
+    async def use_client(self, timeout: float = 30.0):
+        client, idx = await self.acquire(timeout)
+        try:
+            yield client, idx
+        finally:
+            await self.release(idx)
+
+
+# Lazy module-level pool instance
+_client_pool: ClientPool | None = None
+
+def get_client_pool() -> ClientPool:
+    global _client_pool
+    if _client_pool is None:
+        _client_pool = ClientPool(clients)
+    return _client_pool
 
 def get_client_semaphore(client_index: int) -> asyncio.Semaphore:
     if client_index not in _client_semaphores:
@@ -317,6 +410,7 @@ async def _retry_chunk_with_alt_client(
                     wait = min(int(match.group(1)) if match else 60, 120)
                     logger.warning("Alt bot %d: flood wait %ds", alt_c_idx, wait)
                     await asyncio.sleep(wait)
+                    get_client_pool().report_failure(alt_c_idx, flood_wait=wait)
                     continue
         if cycle < max_cycles - 1:
             delay = 2 ** cycle
@@ -324,6 +418,7 @@ async def _retry_chunk_with_alt_client(
             await asyncio.sleep(delay)
     if not results[chunk_idx].done():
         results[chunk_idx].set_result(b"")
+        get_client_pool().report_failure(failed_c_idx)
 
 
 # ── Byte-accurate stream (GDrive) ───────────────────────────────────────────────
@@ -587,105 +682,79 @@ async def parallel_stream_generator(
             return None
 
     async def worker(worker_id: int):
-        client = clients[worker_id % pool_size]
-        c_idx = getattr(client, "pool_index", worker_id % pool_size)
+        pool = get_client_pool()
+        try:
+            async with pool.use_client() as (client, c_idx):
+                # Each worker normally fetches its own fresh Message so file references
+                # are per-client and valid. Bot 0 gets the already-fetched initial_message
+                # to save ~1s round-trip on first chunk.
+                if c_idx == 0:
+                    local_msg = initial_message
+                else:
+                    try:
+                        local_msg = await client.get_messages(chat_id, message_id)
+                    except Exception as e:
+                        logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
+                        return
+                if not local_msg:
+                    logger.error("Bot %d: message %d not found, emitting empty chunks", c_idx, message_id)
+                    while not task_queue.empty():
+                        try:
+                            batch_start, batch_end = task_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        for chunk_offset in range(batch_start, batch_end + 1):
+                            if not results[chunk_offset].done():
+                                results[chunk_offset].set_result(b"")
+                            task_queue.task_done()
+                    return
 
-        # If this helper isn't connected yet, fall back to main bot
-        if not client.is_connected:
-            if clients[0].is_connected:
-                client = clients[0]
-                c_idx = 0
-            else:
-                logger.error("Worker %d: no connected client available", worker_id)
-                return
+                # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
+                # This prevents the "Request refused" or internal queue buildup in Pyrogram
+                semaphore = get_client_semaphore(c_idx)
 
-        # Each worker normally fetches its own fresh Message so file references
-        # are per-client and valid. Bot 0 gets the already-fetched initial_message
-        # to save ~1s round-trip on first chunk.
-        if c_idx == 0:
-            local_msg = initial_message
-        else:
-            try:
-                local_msg = await client.get_messages(chat_id, message_id)
-            except Exception as e:
-                logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
-                return
-        if not local_msg:
-            logger.error("Bot %d: message %d not found, emitting empty chunks", c_idx, message_id)
-            while not task_queue.empty():
-                try:
-                    batch_start, batch_end = task_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-                for chunk_offset in range(batch_start, batch_end + 1):
-                    if not results[chunk_offset].done():
-                        results[chunk_offset].set_result(b"")
-                task_queue.task_done()
-            return
+                while not task_queue.empty():
+                    try:
+                        batch_start, batch_end = task_queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        break
 
-        # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
-        # This prevents the "Request refused" or internal queue buildup in Pyrogram
-        semaphore = get_client_semaphore(c_idx)
-
-        while not task_queue.empty():
-            try:
-                batch_start, batch_end = task_queue.get_nowait()
-            except asyncio.QueueEmpty:
-                break
-
-            batch_ok = False
-            try:
-                batch_ok = await _fetch_batch_with_timeout(batch_start, batch_end, client, local_msg, semaphore)
-            except (FileReferenceInvalid, FileReferenceExpired):
-                logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
-                try:
-                    local_msg = await client.get_messages(chat_id, message_id)
-                    batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                except Exception:
-                    pass
-            except AuthKeyUnregistered:
-                logger.warning("Bot %d: auth key expired in batch, reconnecting...", c_idx)
-                async with get_client_reconnect_lock(c_idx):
-                    if await reconnect_client(client):
+                    batch_ok = False
+                    try:
+                        batch_ok = await _fetch_batch_with_timeout(batch_start, batch_end, client, local_msg, semaphore)
+                    except (FileReferenceInvalid, FileReferenceExpired):
+                        logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
                         try:
                             local_msg = await client.get_messages(chat_id, message_id)
                             batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
                         except Exception:
                             pass
-            except Exception as e:
-                logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
+                    except AuthKeyUnregistered:
+                        logger.warning("Bot %d: auth key expired in batch, reconnecting...", c_idx)
+                        async with get_client_reconnect_lock(c_idx):
+                            if await reconnect_client(client):
+                                try:
+                                    local_msg = await client.get_messages(chat_id, message_id)
+                                    batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
 
-            if batch_ok:
-                task_queue.task_done()
-                continue
+                    if batch_ok:
+                        task_queue.task_done()
+                        continue
 
-            # Fallback: fetch each chunk individually
-            for chunk_offset in range(batch_start, batch_end + 1):
-                try:
-                    chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
-                    if chunk_data is not None:
-                        if not results[chunk_offset].done():
-                            results[chunk_offset].set_result(chunk_data)
-                        continue
-                except (FileReferenceInvalid, FileReferenceExpired):
-                    logger.warning("Bot %d: file reference expired for chunk %d", c_idx, chunk_offset)
-                    try:
-                        local_msg = await client.get_messages(chat_id, message_id)
-                        async with semaphore:
-                            d = bytearray()
-                            async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                d.extend(part)
-                        data = bytes(d)
-                        video_cache.put(chunk_offset, data)
-                        if not results[chunk_offset].done():
-                            results[chunk_offset].set_result(data)
-                        continue
-                    except Exception as e2:
-                        logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
-                except AuthKeyUnregistered:
-                    logger.warning("Bot %d: auth key expired for chunk %d", c_idx, chunk_offset)
-                    async with get_client_reconnect_lock(c_idx):
-                        if await reconnect_client(client):
+                    # Fallback: fetch each chunk individually
+                    for chunk_offset in range(batch_start, batch_end + 1):
+                        try:
+                            chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
+                            if chunk_data is not None:
+                                if not results[chunk_offset].done():
+                                    results[chunk_offset].set_result(chunk_data)
+                                continue
+                        except (FileReferenceInvalid, FileReferenceExpired):
+                            logger.warning("Bot %d: file reference expired for chunk %d", c_idx, chunk_offset)
                             try:
                                 local_msg = await client.get_messages(chat_id, message_id)
                                 async with semaphore:
@@ -698,13 +767,35 @@ async def parallel_stream_generator(
                                     results[chunk_offset].set_result(data)
                                 continue
                             except Exception as e2:
-                                logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
-                        else:
-                            logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
-                except Exception as e:
-                    logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
-            task_queue.task_done()
+                                logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
+                        except AuthKeyUnregistered:
+                            logger.warning("Bot %d: auth key expired for chunk %d", c_idx, chunk_offset)
+                            async with get_client_reconnect_lock(c_idx):
+                                if await reconnect_client(client):
+                                    try:
+                                        local_msg = await client.get_messages(chat_id, message_id)
+                                        async with semaphore:
+                                            d = bytearray()
+                                            async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
+                                                d.extend(part)
+                                        data = bytes(d)
+                                        video_cache.put(chunk_offset, data)
+                                        if not results[chunk_offset].done():
+                                            results[chunk_offset].set_result(data)
+                                        continue
+                                    except Exception as e2:
+                                        logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
+                                else:
+                                    logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
+                        except Exception as e:
+                            logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
+                        await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
+                    task_queue.task_done()
+                pool.report_success(c_idx)
+        except ClientPoolEmpty:
+            logger.error("Worker %d: no connected client available", worker_id)
+        except asyncio.TimeoutError:
+            logger.error("Worker %d: timed out waiting for client", worker_id)
 
     # ── Backpressure: cap in-flight resolved chunks ─────────────────
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.

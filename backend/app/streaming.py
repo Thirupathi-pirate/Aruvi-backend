@@ -595,7 +595,7 @@ async def parallel_stream_generator(
     _cdn_location = None
     _cdn_bot = None
     _cdn_failures = 0  # consecutive CDN transport failures — disables CDN at 1
-    MAX_CDN_FAILURES = 1  # CDN consistently fails on HF egress (shared IP); one strike and we disable
+    MAX_CDN_FAILURES = 0  # CDN never works here (no session strings + shared egress IP); skip entirely
     _cdn_refresh_lock = asyncio.Lock()
     _cdn_init_lock = asyncio.Lock()
 

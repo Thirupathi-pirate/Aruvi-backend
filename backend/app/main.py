@@ -146,6 +146,12 @@ app.include_router(diagnostic_router, prefix="/api")
 
 
 
+@app.head("/health", include_in_schema=False)
+async def health_head():
+    """HEAD handler for load balancer probes."""
+    return ""
+
+
 @app.get("/health")
 async def health():
     """Health check with client connection status."""

@@ -134,6 +134,8 @@ class WatchProgressUpdate(BaseModel):
     duration: Optional[int] = None
     completed: Optional[bool] = None
 
+    model_config = ConfigDict(extra="ignore")  # Android client sends extra fields
+
 
 class WatchProgressResponse(WatchProgressBase):
     id: int

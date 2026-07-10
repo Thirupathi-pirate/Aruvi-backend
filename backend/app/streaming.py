@@ -10,6 +10,7 @@ from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 
 BATCH_SIZE = 10  # chunks per stream_media call
+CHUNK_SIZE = 1024 * 1024  # 1 MB per chunk
 
 
 def _get_media(message):
@@ -32,9 +33,9 @@ def _get_upload_location(file_id_obj, thumb_size=""):
 class ChunkCache:
     """Per-video FIFO cache for already-yielded chunks (backward seek support).
     Key: chunk_idx -> bytes
-    Max size: 200MB per video, evicts oldest entries when full.
+    Max size: 1GB per video, evicts oldest entries when full.
     """
-    def __init__(self, max_bytes: int = 200 * 1024 * 1024):
+    def __init__(self, max_bytes: int = 1024 * 1024 * 1024):
         self._data: dict[int, bytes] = {}
         self._order: list[int] = []
         self._size = 0
@@ -91,10 +92,10 @@ class ChunkCache:
 
 class CacheManager:
     """Manages per-video ChunkCache instances.
-    Each (chat_id, message_id) pair gets its own 200MB FIFO cache,
+    Each (chat_id, message_id) pair gets its own 1GB FIFO cache,
     so concurrent streams don't evict each other's backward seek data.
     """
-    def __init__(self, per_video_max: int = 200 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 1024 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
 
@@ -347,80 +348,6 @@ def get_client_reconnect_lock(client_index: int) -> asyncio.Lock:
 
 # ── Chunk fetch helpers ────────────────────────────────────────────────────────
 
-async def _retry_chunk_with_alt_client(
-    failed_c_idx: int,
-    chunk_idx: int,
-    chat_id: int,
-    message_id: int,
-    results: dict,
-):
-    """Try fetching the chunk with a different client before giving up.
-
-    Retries up to 2 full cycles with exponential backoff (2^cycle).
-    Handles flood wait, auth expiry, and transient network errors.
-    Only yields empty bytes as absolute last resort.
-    """
-    pool_size = len(clients)
-    max_cycles = 2
-    for cycle in range(max_cycles):
-        for offset in range(1, pool_size):
-            alt_c_idx = (failed_c_idx + offset) % pool_size
-            if alt_c_idx == failed_c_idx:
-                continue
-            alt_client = clients[alt_c_idx]
-            try:
-                alt_msg = await alt_client.get_messages(chat_id, message_id)
-                if not alt_msg:
-                    continue
-                async with get_client_semaphore(alt_c_idx):
-                    data = bytearray()
-                    async for part in alt_client.stream_media(
-                        alt_msg, limit=1, offset=chunk_idx
-                    ):
-                        data.extend(part)
-                chunk_bytes = bytes(data)
-                _cache_manager.get_cache(chat_id, message_id).put(chunk_idx, chunk_bytes)
-                if not results[chunk_idx].done():
-                    results[chunk_idx].set_result(chunk_bytes)
-                    return
-            except AuthKeyUnregistered:
-                logger.warning("Alt bot %d: auth key expired, reconnecting...", alt_c_idx)
-                async with get_client_reconnect_lock(alt_c_idx):
-                    if await reconnect_client(alt_client):
-                        try:
-                            alt_msg = await alt_client.get_messages(chat_id, message_id)
-                            if alt_msg:
-                                async with get_client_semaphore(alt_c_idx):
-                                    data = bytearray()
-                                    async for part in alt_client.stream_media(
-                                        alt_msg, limit=1, offset=chunk_idx
-                                    ):
-                                        data.extend(part)
-                                chunk_bytes = bytes(data)
-                                _cache_manager.get_cache(chat_id, message_id).put(chunk_idx, chunk_bytes)
-                                if not results[chunk_idx].done():
-                                    results[chunk_idx].set_result(chunk_bytes)
-                                    return
-                        except Exception:
-                            pass
-            except Exception as e:
-                err_str = str(e).lower()
-                if "flood" in err_str:
-                    match = re.search(r"(\d+)", err_str)
-                    wait = min(int(match.group(1)) if match else 60, 120)
-                    logger.warning("Alt bot %d: flood wait %ds", alt_c_idx, wait)
-                    await asyncio.sleep(wait)
-                    get_client_pool().report_failure(alt_c_idx, flood_wait=wait)
-                    continue
-        if cycle < max_cycles - 1:
-            delay = 2 ** cycle
-            logger.debug("Retry cycle %d: sleeping %ds before next attempt", cycle, delay)
-            await asyncio.sleep(delay)
-    if not results[chunk_idx].done():
-        results[chunk_idx].set_result(b"")
-        get_client_pool().report_failure(failed_c_idx)
-
-
 # ── Byte-accurate stream (GDrive) ───────────────────────────────────────────────
 
 async def _byte_accurate_file_stream(client, message, file_size: int, offset_start: int, offset_end: int):
@@ -613,6 +540,101 @@ async def parallel_stream_generator(
             batch_end = min(batch_start + BATCH_SIZE - 1, rend)
             task_queue.put_nowait((batch_start, batch_end))
 
+    # ── Shared CDN session setup ─────────────────────────────────────────
+    # One session, one TCP connection to Telegram's CDN, shared by all workers.
+    # Eliminates per-bot API calls and CDN connection contention.
+    _cdn_session = None
+    _cdn_location = None
+    _cdn_client_ref = None
+    _refresh_lock = asyncio.Lock()
+
+    media = _get_media(initial_message)
+    if media:
+        try:
+            cdn_file_id = FileId.decode(media.file_id)
+            cdn_dc_id = cdn_file_id.dc_id
+            _cdn_location = _get_upload_location(cdn_file_id)
+            _cdn_client_ref = next((c for c in clients if c.is_connected), clients[0])
+            sess = _cdn_client_ref.media_sessions.get(cdn_dc_id)
+            if not sess:
+                sess = Session(
+                    _cdn_client_ref, cdn_dc_id,
+                    await Auth(_cdn_client_ref, cdn_dc_id, await _cdn_client_ref.storage.test_mode()).create()
+                    if cdn_dc_id != await _cdn_client_ref.storage.dc_id()
+                    else await _cdn_client_ref.storage.auth_key(),
+                    await _cdn_client_ref.storage.test_mode(), is_media=True,
+                )
+                await sess.start()
+                if cdn_dc_id != await _cdn_client_ref.storage.dc_id():
+                    for _ in range(3):
+                        exported = await _cdn_client_ref.invoke(
+                            raw.functions.auth.ExportAuthorization(dc_id=cdn_dc_id))
+                        try:
+                            await sess.invoke(
+                                raw.functions.auth.ImportAuthorization(id=exported.id, bytes=exported.bytes))
+                            break
+                        except Exception:
+                            continue
+                _cdn_client_ref.media_sessions[cdn_dc_id] = sess
+            _cdn_session = sess
+        except Exception as e:
+            logger.warning("CDN session setup failed: %s, using per-client streaming", e)
+
+    async def _fetch_batch_cdn(batch_start, batch_end):
+        """Fetch batch via shared CDN session. Falls back to stream_media on error."""
+        nonlocal _cdn_session, _cdn_location
+        t0 = time.perf_counter()
+        current = batch_start
+        try:
+            for chunk_offset in range(batch_start, batch_end + 1):
+                offset = chunk_offset * CHUNK_SIZE
+                try:
+                    r = await _cdn_session.invoke(
+                        raw.functions.upload.GetFile(
+                            location=_cdn_location, offset=offset,
+                            limit=CHUNK_SIZE, precise=True,
+                        ),
+                        sleep_threshold=getattr(_cdn_client_ref, 'sleep_threshold', 60),
+                    )
+                except (FileReferenceExpired, FileReferenceInvalid):
+                    async with _refresh_lock:
+                        refreshed = await _cdn_client_ref.get_messages(chat_id, message_id)
+                        if refreshed:
+                            refreshed_media = _get_media(refreshed)
+                            if refreshed_media:
+                                fid = FileId.decode(refreshed_media.file_id)
+                                _cdn_location = _get_upload_location(fid)
+                    r = await _cdn_session.invoke(
+                        raw.functions.upload.GetFile(
+                            location=_cdn_location, offset=offset,
+                            limit=CHUNK_SIZE, precise=True,
+                        ),
+                        sleep_threshold=getattr(_cdn_client_ref, 'sleep_threshold', 60),
+                    )
+
+                if isinstance(r, raw.types.upload.File):
+                    data = bytes(r.bytes)
+                elif isinstance(r, raw.types.upload.FileCdnRedirect):
+                    logger.info("CDN redirect for chunk %d, falling back to stream_media", chunk_offset)
+                    return None  # signal fallback
+                else:
+                    break
+                if not data:
+                    break
+                video_cache.put(current, data)
+                if not results[current].done():
+                    results[current].set_result(data)
+                await _backpressure.acquire()
+                current += 1
+        except (ConnectionError, OSError, TimeoutError, Exception) as e:
+            logger.warning("CDN session error: %s, falling back to stream_media", e)
+            return None
+
+        elapsed = time.perf_counter() - t0
+        if elapsed > 2.5:
+            logger.warning("Slow batch %d-%d: %.1fs (cdn)", batch_start, batch_end, elapsed)
+        return current - 1 == batch_end
+
     async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
         """Fetch a batch, assigning each chunk as it arrives.
         Forward-caches each chunk immediately so concurrent streams
@@ -634,37 +656,6 @@ async def parallel_stream_generator(
         if elapsed > 2.5:
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
         return current - 1 == batch_end
-
-    async def _fetch_batch_with_timeout(batch_start, batch_end, cl, msg, sem):
-        """_fetch_batch with a 30s watchdog — races unresolved chunks via alt clients."""
-        async def _watchdog(main_task):
-            try:
-                await asyncio.sleep(30)
-                if not main_task.done():
-                    unresolved = [
-                        co for co in range(batch_start, batch_end + 1)
-                        if not results[co].done()
-                    ]
-                    if unresolved:
-                        logger.warning(
-                            "Batch %d-%d timeout (%d left), alt-fetching...",
-                            batch_start, batch_end, len(unresolved)
-                        )
-                        for co in unresolved:
-                            asyncio.create_task(
-                                _retry_chunk_with_alt_client(c_idx, co, chat_id, message_id, results)
-                            )
-            except asyncio.CancelledError:
-                pass
-
-        main_task = asyncio.create_task(
-            _fetch_batch(batch_start, batch_end, cl, msg, sem)
-        )
-        watchdog = asyncio.create_task(_watchdog(main_task))
-        try:
-            return await main_task
-        finally:
-            watchdog.cancel()
 
     async def _fetch_one(chunk_offset, cl, msg, sem):
         """Fetch a single chunk, forward-caching it on success."""
@@ -721,7 +712,12 @@ async def parallel_stream_generator(
 
                     batch_ok = False
                     try:
-                        batch_ok = await _fetch_batch_with_timeout(batch_start, batch_end, client, local_msg, semaphore)
+                        if _cdn_session is not None:
+                            batch_ok = await _fetch_batch_cdn(batch_start, batch_end)
+                            if batch_ok is None:
+                                batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                        else:
+                            batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
                     except (FileReferenceInvalid, FileReferenceExpired):
                         logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
                         try:
@@ -789,8 +785,7 @@ async def parallel_stream_generator(
                                     logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                         except Exception as e:
                             logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                        await _retry_chunk_with_alt_client(c_idx, chunk_offset, chat_id, message_id, results)
-                    task_queue.task_done()
+                        task_queue.task_done()
                 pool.report_success(c_idx)
         except ClientPoolEmpty:
             logger.error("Worker %d: no connected client available", worker_id)

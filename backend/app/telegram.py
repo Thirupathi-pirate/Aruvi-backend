@@ -241,7 +241,7 @@ async def _finish_startup():
             asyncio.create_task(start_one_client(i, c))
 
         # Poll until at least MIN_HELPERS are connected (or 30s timeout)
-        MIN_HELPERS = 13
+        MIN_HELPERS = 16 #TW
         for _ in range(60):
             connected = sum(
                 1 for c in clients

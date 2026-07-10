@@ -3,6 +3,7 @@ Custom streaming utilities for Telegram media files.
 Multi-client parallel streaming for maximum download speed.
 """
 import asyncio
+import itertools
 import re
 import time
 import logging
@@ -220,6 +221,55 @@ from .telegram import clients, reconnect_client
 from .config import get_settings
 
 settings = get_settings()
+
+# ── CDN bot rotation ─────────────────────────────────────────────────
+_bot_cdn_cycle = itertools.cycle(clients)  # round-robin across all bots
+
+
+def _pick_cdn_bot():
+    """Pick next connected bot for CDN session (round-robin)."""
+    for _ in range(len(clients) * 2):
+        c = next(_bot_cdn_cycle)
+        if c.is_connected:
+            return c
+    return next((c for c in clients if c.is_connected), clients[0])
+
+
+async def _create_media_session(client, dc_id):
+    """Create a media session for a client on the given DC. Returns Session or None."""
+    sess = client.media_sessions.get(dc_id)
+    if sess:
+        return sess
+    try:
+        sess = Session(
+            client, dc_id,
+            await Auth(client, dc_id, await client.storage.test_mode()).create()
+            if dc_id != await client.storage.dc_id()
+            else await client.storage.auth_key(),
+            await client.storage.test_mode(),
+            is_media=True,
+        )
+        await sess.start()
+        if dc_id != await client.storage.dc_id():
+            for _ in range(3):
+                exported = await client.invoke(
+                    raw.functions.auth.ExportAuthorization(dc_id=dc_id))
+                try:
+                    await sess.invoke(
+                        raw.functions.auth.ImportAuthorization(
+                            id=exported.id, bytes=exported.bytes))
+                    break
+                except (AuthKeyUnregistered, Exception) as _e:
+                    if isinstance(_e, AuthKeyUnregistered) or "AUTH_BYTES_INVALID" in str(_e):
+                        continue
+                    raise
+            else:
+                raise AuthKeyUnregistered("Could not export auth to file DC")
+        client.media_sessions[dc_id] = sess
+        return sess
+    except Exception as e:
+        logger.warning("Media session creation failed for DC %d: %s", dc_id, e)
+        return None
 
 logger = logging.getLogger("streamer")
 logger.setLevel(logging.INFO)
@@ -540,83 +590,97 @@ async def parallel_stream_generator(
             batch_end = min(batch_start + BATCH_SIZE - 1, rend)
             task_queue.put_nowait((batch_start, batch_end))
 
-    # ── Shared CDN session setup ─────────────────────────────────────────
-    # One session, one TCP connection to Telegram's CDN, shared by all workers.
-    # Eliminates per-bot API calls and CDN connection contention.
+    # ── CDN session (per-stream, lazy, bot rotation) ──────────────────
     _cdn_session = None
     _cdn_location = None
-    _cdn_client_ref = None
-    _refresh_lock = asyncio.Lock()
+    _cdn_bot = None
+    _cdn_refresh_lock = asyncio.Lock()
+    _cdn_init_lock = asyncio.Lock()
 
-    media = _get_media(initial_message)
-    if media:
-        try:
-            cdn_file_id = FileId.decode(media.file_id)
-            cdn_dc_id = cdn_file_id.dc_id
-            _cdn_location = _get_upload_location(cdn_file_id)
-            _cdn_client_ref = next((c for c in clients if c.is_connected), clients[0])
-            sess = _cdn_client_ref.media_sessions.get(cdn_dc_id)
-            if not sess:
-                sess = Session(
-                    _cdn_client_ref, cdn_dc_id,
-                    await Auth(_cdn_client_ref, cdn_dc_id, await _cdn_client_ref.storage.test_mode()).create()
-                    if cdn_dc_id != await _cdn_client_ref.storage.dc_id()
-                    else await _cdn_client_ref.storage.auth_key(),
-                    await _cdn_client_ref.storage.test_mode(), is_media=True,
-                )
-                await sess.start()
-                if cdn_dc_id != await _cdn_client_ref.storage.dc_id():
-                    for _ in range(3):
-                        exported = await _cdn_client_ref.invoke(
-                            raw.functions.auth.ExportAuthorization(dc_id=cdn_dc_id))
-                        try:
-                            await sess.invoke(
-                                raw.functions.auth.ImportAuthorization(id=exported.id, bytes=exported.bytes))
-                            break
-                        except Exception:
-                            continue
-                _cdn_client_ref.media_sessions[cdn_dc_id] = sess
-            _cdn_session = sess
-        except Exception as e:
-            logger.warning("CDN session setup failed: %s, using per-client streaming", e)
+    async def _ensure_cdn_session():
+        """Lazy init CDN session with round-robin bot. Returns (session, location) or (None, None)."""
+        nonlocal _cdn_session, _cdn_location, _cdn_bot
+        if _cdn_session is not None:
+            return _cdn_session, _cdn_location
+        async with _cdn_init_lock:
+            if _cdn_session is not None:  # double-check
+                return _cdn_session, _cdn_location
+            bot = _pick_cdn_bot()
+            media = _get_media(initial_message)
+            if not media or not bot:
+                return None, None
+            try:
+                fid = FileId.decode(media.file_id)
+                dc_id = fid.dc_id
+                loc = _get_upload_location(fid)
+                sess = await _create_media_session(bot, dc_id)
+                if sess:
+                    _cdn_session = sess
+                    _cdn_location = loc
+                    _cdn_bot = bot
+                    idx = getattr(bot, 'pool_index', '?')
+                    logger.info("CDN session ready on bot %s DC %d", idx, dc_id)
+                    return sess, loc
+            except Exception as e:
+                logger.warning("CDN session init failed: %s", e)
+        return None, None
+
+    def _rotate_cdn_bot():
+        """Switch CDN bot on transport error — next batch re-inits with a different bot."""
+        nonlocal _cdn_session, _cdn_location, _cdn_bot
+        old_idx = getattr(_cdn_bot, 'pool_index', '?') if _cdn_bot else '?'
+        _cdn_session = None
+        _cdn_location = None
+        _cdn_bot = _pick_cdn_bot()
+        new_idx = getattr(_cdn_bot, 'pool_index', '?') if _cdn_bot else '?'
+        logger.info("Rotated CDN bot %s → %s", old_idx, new_idx)
 
     async def _fetch_batch_cdn(batch_start, batch_end):
-        """Fetch batch via shared CDN session. Falls back to stream_media on error."""
-        nonlocal _cdn_session, _cdn_location
+        """Fetch batch via CDN session with lazy init and bot rotation on transport error."""
+        nonlocal _cdn_session, _cdn_location, _cdn_bot
+        sess, loc = await _ensure_cdn_session()
+        if sess is None or loc is None:
+            return None
         t0 = time.perf_counter()
         current = batch_start
         try:
             for chunk_offset in range(batch_start, batch_end + 1):
                 offset = chunk_offset * CHUNK_SIZE
                 try:
-                    r = await _cdn_session.invoke(
+                    r = await sess.invoke(
                         raw.functions.upload.GetFile(
-                            location=_cdn_location, offset=offset,
+                            location=loc, offset=offset,
                             limit=CHUNK_SIZE, precise=True,
                         ),
-                        sleep_threshold=getattr(_cdn_client_ref, 'sleep_threshold', 60),
+                        sleep_threshold=getattr(_cdn_bot, "sleep_threshold", 60) if _cdn_bot else 60,
                     )
                 except (FileReferenceExpired, FileReferenceInvalid):
-                    async with _refresh_lock:
-                        refreshed = await _cdn_client_ref.get_messages(chat_id, message_id)
-                        if refreshed:
-                            refreshed_media = _get_media(refreshed)
-                            if refreshed_media:
-                                fid = FileId.decode(refreshed_media.file_id)
-                                _cdn_location = _get_upload_location(fid)
-                    r = await _cdn_session.invoke(
-                        raw.functions.upload.GetFile(
-                            location=_cdn_location, offset=offset,
-                            limit=CHUNK_SIZE, precise=True,
-                        ),
-                        sleep_threshold=getattr(_cdn_client_ref, 'sleep_threshold', 60),
-                    )
+                    async with _cdn_refresh_lock:
+                        if _cdn_bot:
+                            refreshed = await _cdn_bot.get_messages(chat_id, message_id)
+                            if refreshed:
+                                refreshed_media = _get_media(refreshed)
+                                if refreshed_media:
+                                    fid = FileId.decode(refreshed_media.file_id)
+                                    loc = _get_upload_location(fid)
+                                    _cdn_location = loc
+                                    r = await sess.invoke(
+                                        raw.functions.upload.GetFile(
+                                            location=loc, offset=offset,
+                                            limit=CHUNK_SIZE, precise=True,
+                                        ),
+                                        sleep_threshold=getattr(_cdn_bot, "sleep_threshold", 60),
+                                    )
+                            else:
+                                return None
+                        else:
+                            return None
 
                 if isinstance(r, raw.types.upload.File):
                     data = bytes(r.bytes)
                 elif isinstance(r, raw.types.upload.FileCdnRedirect):
-                    logger.info("CDN redirect for chunk %d, falling back to stream_media", chunk_offset)
-                    return None  # signal fallback
+                    logger.info("CDN redirect at chunk %d, falling back", chunk_offset)
+                    return None
                 else:
                     break
                 if not data:
@@ -626,8 +690,12 @@ async def parallel_stream_generator(
                     results[current].set_result(data)
                 await _backpressure.acquire()
                 current += 1
-        except (ConnectionError, OSError, TimeoutError, Exception) as e:
-            logger.warning("CDN session error: %s, falling back to stream_media", e)
+        except (ConnectionError, OSError, TimeoutError) as e:
+            logger.warning("CDN transport error: %s, rotating bot", e)
+            _rotate_cdn_bot()
+            return None
+        except Exception as e:
+            logger.warning("CDN session error: %s, fallback to stream_media", e)
             return None
 
         elapsed = time.perf_counter() - t0
@@ -712,11 +780,8 @@ async def parallel_stream_generator(
 
                     batch_ok = False
                     try:
-                        if _cdn_session is not None:
-                            batch_ok = await _fetch_batch_cdn(batch_start, batch_end)
-                            if batch_ok is None:
-                                batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                        else:
+                        batch_ok = await _fetch_batch_cdn(batch_start, batch_end)
+                        if batch_ok is None:
                             batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
                     except (FileReferenceInvalid, FileReferenceExpired):
                         logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)

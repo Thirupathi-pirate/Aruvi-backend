@@ -34,10 +34,9 @@ def _get_upload_location(file_id_obj, thumb_size=""):
 class ChunkCache:
     """Per-video FIFO cache for already-yielded chunks (backward seek support).
     Key: chunk_idx -> bytes
-Max size: 2GB per video, evicts oldest entries when full.
-    Notifies parent CacheManager for global budget enforcement.
+    Max size: 1GB per video, evicts oldest entries when full.
     """
-    def __init__(self, max_bytes: int = 2 * 1024 * 1024 * 1024, parent=None):
+    def __init__(self, max_bytes: int = 1024 * 1024 * 1024):
         self._data: dict[int, bytes] = {}
         self._order: list[int] = []
         self._size = 0
@@ -45,7 +44,6 @@ Max size: 2GB per video, evicts oldest entries when full.
         self._hits = 0
         self._misses = 0
         self._evictions = 0
-        self._parent = parent
 
     def get(self, key: int) -> bytes | None:
         data = self._data.get(key)
@@ -61,23 +59,17 @@ Max size: 2GB per video, evicts oldest entries when full.
         self._data[key] = data
         self._order.append(key)
         self._size += len(data)
-        if self._parent:
-            self._parent._notify_put(len(data))
         while self._size > self._max and self._order:
             old_key = self._order.pop(0)
             old_data = self._data.pop(old_key, None)
             if old_data:
                 self._size -= len(old_data)
-                if self._parent:
-                    self._parent._notify_evict(len(old_data))
                 self._evictions += 1
-        if self._evictions and (self._evictions == 1 or self._evictions % 10 == 0):
-            logger.info("Evicted %d chunks (%.1f MB)", self._evictions, self._size / 1024 / 1024)
+                if self._evictions == 1 or self._evictions % 10 == 0:
+                    logger.info("Evicted %d chunks (%.1f MB)", self._evictions, self._size / 1024 / 1024)
 
     def clear(self) -> int:
         freed = self._size
-        if freed and self._parent:
-            self._parent._notify_evict(freed)
         self._data.clear()
         self._order.clear()
         self._size = 0
@@ -99,57 +91,31 @@ Max size: 2GB per video, evicts oldest entries when full.
 
 
 
-
 class CacheManager:
-    """Manages per-video ChunkCache instances with global budget.
-    Each (chat_id, message_id) pair gets its own 2GB FIFO cache.
-    Total across all caches capped at 3GB; evicts largest cache when exceeded.
+    """Manages per-video ChunkCache instances.
+    Each (chat_id, message_id) pair gets its own 1GB FIFO cache,
+    so concurrent streams don't evict each other's backward seek data.
     """
-    def __init__(self, per_video_max: int = 2 * 1024 * 1024 * 1024, max_total: int = 3 * 1024 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 1024 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
-        self._max_total = max_total
-        self._total_size = 0
-
-    def _notify_put(self, size: int):
-        self._total_size += size
-        if self._total_size > self._max_total:
-            self._evict_to_limit()
-
-    def _notify_evict(self, size: int):
-        self._total_size -= size
-
-    def _evict_to_limit(self):
-        """Evict the largest per-video cache until total is under max_total."""
-        while self._total_size > self._max_total and self._caches:
-            largest_key = max(self._caches.keys(), key=lambda k: self._caches[k]._size)
-            cache = self._caches.pop(largest_key)
-            freed = cache._size
-            cache.clear()
-            self._total_size -= freed
-            logger.info("Global cache evict: msg=%s (%.1f MB)", largest_key, freed / 1024 / 1024)
 
     def get_cache(self, chat_id: int, message_id: int) -> ChunkCache:
         key = (chat_id, message_id)
         if key not in self._caches:
-            self._caches[key] = ChunkCache(max_bytes=self._per_video_max, parent=self)
+            self._caches[key] = ChunkCache(max_bytes=self._per_video_max)
         return self._caches[key]
 
     def remove(self, chat_id: int, message_id: int):
         key = (chat_id, message_id)
         if key in self._caches:
-            cache = self._caches.pop(key)
-            self._total_size -= cache._size
-            cache.clear()
+            self._caches.pop(key).clear()
 
     def clear_all(self, exclude_keys: set[tuple[int, int]] | None = None) -> int:
         total = 0
         keys_to_clear = [k for k in self._caches if exclude_keys is None or k not in exclude_keys]
         for key in keys_to_clear:
-            cache = self._caches.pop(key)
-            total += cache._size
-            cache.clear()
-        self._total_size -= total
+            total += self._caches.pop(key).clear()
         return total
 
     @property
@@ -786,134 +752,122 @@ async def parallel_stream_generator(
         except Exception:
             return None
 
-
-async def worker(worker_id: int):
-    pool = get_client_pool()
-    try:
-        async with pool.use_client() as (client, c_idx):
-            if c_idx == 0:
-                local_msg = initial_message
-            else:
-                try:
-                    local_msg = await client.get_messages(chat_id, message_id)
-                except Exception as e:
-                    logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
+    async def worker(worker_id: int):
+        pool = get_client_pool()
+        try:
+            async with pool.use_client() as (client, c_idx):
+                # Each worker normally fetches its own fresh Message so file references
+                # are per-client and valid. Bot 0 gets the already-fetched initial_message
+                # to save ~1s round-trip on first chunk.
+                if c_idx == 0:
+                    local_msg = initial_message
+                else:
+                    try:
+                        local_msg = await client.get_messages(chat_id, message_id)
+                    except Exception as e:
+                        logger.error("Bot %d: failed to fetch message %d: %s", c_idx, message_id, e)
+                        return
+                if not local_msg:
+                    logger.error("Bot %d: message %d not found, emitting empty chunks", c_idx, message_id)
+                    while not task_queue.empty():
+                        try:
+                            batch_start, batch_end = task_queue.get_nowait()
+                        except asyncio.QueueEmpty:
+                            break
+                        for chunk_offset in range(batch_start, batch_end + 1):
+                            if not results[chunk_offset].done():
+                                results[chunk_offset].set_result(b"")
+                            task_queue.task_done()
                     return
-            if not local_msg:
-                logger.error("Bot %d: message %d not found, emitting empty chunks", c_idx, message_id)
+
+                # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
+                # This prevents the "Request refused" or internal queue buildup in Pyrogram
+                semaphore = get_client_semaphore(c_idx)
+
                 while not task_queue.empty():
                     try:
                         batch_start, batch_end = task_queue.get_nowait()
                     except asyncio.QueueEmpty:
                         break
-                    for chunk_offset in range(batch_start, batch_end + 1):
-                        if not results[chunk_offset].done():
-                            results[chunk_offset].set_result(b"")
-                        task_queue.task_done()
-                return
 
-            semaphore = get_client_semaphore(c_idx)
-
-            while not task_queue.empty():
-                try:
-                    batch_start, batch_end = task_queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    break
-
-                batch_ok = False
-                try:
-                    batch_ok = await _fetch_batch_cdn(batch_start, batch_end)
-                    if batch_ok is None:
-                        batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                except (FileReferenceInvalid, FileReferenceExpired):
-                    logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
+                    batch_ok = False
                     try:
-                        local_msg = await client.get_messages(chat_id, message_id)
-                        batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                    except Exception:
-                        pass
-                except AuthKeyUnregistered:
-                    logger.warning("Bot %d: auth key expired in batch, reconnecting...", c_idx)
-                    async with get_client_reconnect_lock(c_idx):
-                        if await reconnect_client(client):
-                            try:
-                                local_msg = await client.get_messages(chat_id, message_id)
-                                batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
-                            except Exception:
-                                pass
-                except Exception as e:
-                    logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
-
-                if batch_ok:
-                    task_queue.task_done()
-                    continue
-
-                # Fallback: fetch each chunk individually
-                for chunk_offset in range(batch_start, batch_end + 1):
-                    try:
-                        chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
-                        if chunk_data is not None:
-                            if not results[chunk_offset].done():
-                                results[chunk_offset].set_result(chunk_data)
-                            continue
-                        # ponytail: single retry with 500ms backoff before giving up
-                        await asyncio.sleep(0.5)
-                        chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
-                        if chunk_data is not None:
-                            if not results[chunk_offset].done():
-                                results[chunk_offset].set_result(chunk_data)
-                            continue
-                        # ponytail: both attempts failed — raise to trigger except
-                        raise RuntimeError(
-                            f"Bot {c_idx} failed chunk {chunk_offset} after retry"
-                        )
+                        batch_ok = await _fetch_batch_cdn(batch_start, batch_end)
+                        if batch_ok is None:
+                            batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
                     except (FileReferenceInvalid, FileReferenceExpired):
-                        logger.warning("Bot %d: file reference expired for chunk %d", c_idx, chunk_offset)
+                        logger.warning("Bot %d: batch file reference expired, re-fetching message", c_idx)
                         try:
                             local_msg = await client.get_messages(chat_id, message_id)
-                            async with semaphore:
-                                d = bytearray()
-                                async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                    d.extend(part)
+                            batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                        except Exception:
+                            pass
+                    except AuthKeyUnregistered:
+                        logger.warning("Bot %d: auth key expired in batch, reconnecting...", c_idx)
+                        async with get_client_reconnect_lock(c_idx):
+                            if await reconnect_client(client):
+                                try:
+                                    local_msg = await client.get_messages(chat_id, message_id)
+                                    batch_ok = await _fetch_batch(batch_start, batch_end, client, local_msg, semaphore)
+                                except Exception:
+                                    pass
+                    except Exception as e:
+                        logger.error("Bot %d failed batch %d-%d: %s", c_idx, batch_start, batch_end, e)
+
+                    if batch_ok:
+                        task_queue.task_done()
+                        continue
+
+                    # Fallback: fetch each chunk individually
+                    for chunk_offset in range(batch_start, batch_end + 1):
+                        try:
+                            chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
+                            if chunk_data is not None:
+                                if not results[chunk_offset].done():
+                                    results[chunk_offset].set_result(chunk_data)
+                                continue
+                        except (FileReferenceInvalid, FileReferenceExpired):
+                            logger.warning("Bot %d: file reference expired for chunk %d", c_idx, chunk_offset)
+                            try:
+                                local_msg = await client.get_messages(chat_id, message_id)
+                                async with semaphore:
+                                    d = bytearray()
+                                    async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
+                                        d.extend(part)
                                 data = bytes(d)
                                 video_cache.put(chunk_offset, data)
                                 if not results[chunk_offset].done():
                                     results[chunk_offset].set_result(data)
                                 continue
-                        except Exception as e2:
-                            logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
-                    except AuthKeyUnregistered:
-                        logger.warning("Bot %d: auth key expired for chunk %d", c_idx, chunk_offset)
-                        async with get_client_reconnect_lock(c_idx):
-                            if await reconnect_client(client):
-                                try:
-                                    local_msg = await client.get_messages(chat_id, message_id)
-                                    async with semaphore:
-                                        d = bytearray()
-                                        async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
-                                            d.extend(part)
+                            except Exception as e2:
+                                logger.error("Bot %d failed chunk %d after re-fetch: %s", c_idx, chunk_offset, e2)
+                        except AuthKeyUnregistered:
+                            logger.warning("Bot %d: auth key expired for chunk %d", c_idx, chunk_offset)
+                            async with get_client_reconnect_lock(c_idx):
+                                if await reconnect_client(client):
+                                    try:
+                                        local_msg = await client.get_messages(chat_id, message_id)
+                                        async with semaphore:
+                                            d = bytearray()
+                                            async for part in client.stream_media(local_msg, limit=1, offset=chunk_offset):
+                                                d.extend(part)
                                         data = bytes(d)
                                         video_cache.put(chunk_offset, data)
                                         if not results[chunk_offset].done():
                                             results[chunk_offset].set_result(data)
                                         continue
-                                except Exception as e2:
-                                    logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
-                            else:
-                                logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
-                    except Exception as e:
-                        logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                        # ponytail: abort stream instead of hanging on unresolved future
-                        if not results[chunk_offset].done():
-                            results[chunk_offset].set_exception(
-                                RuntimeError(f"Bot {c_idx} failed chunk {chunk_offset}")
-                            )
-                    task_queue.task_done()
-            pool.report_success(c_idx)
-    except ClientPoolEmpty:
-        logger.error("Worker %d: no connected client available", worker_id)
-    except asyncio.TimeoutError:
-        logger.error("Worker %d: timed out waiting for client", worker_id)
+                                    except Exception as e2:
+                                        logger.error("Bot %d failed chunk %d after reconnect: %s", c_idx, chunk_offset, e2)
+                                else:
+                                    logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
+                        except Exception as e:
+                            logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
+                        task_queue.task_done()
+                pool.report_success(c_idx)
+        except ClientPoolEmpty:
+            logger.error("Worker %d: no connected client available", worker_id)
+        except asyncio.TimeoutError:
+            logger.error("Worker %d: timed out waiting for client", worker_id)
 
     # ── Backpressure: cap in-flight resolved chunks ─────────────────
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.

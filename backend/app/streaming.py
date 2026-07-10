@@ -856,6 +856,17 @@ async def worker(worker_id: int):
                             if not results[chunk_offset].done():
                                 results[chunk_offset].set_result(chunk_data)
                             continue
+                        # ponytail: single retry with 500ms backoff before giving up
+                        await asyncio.sleep(0.5)
+                        chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
+                        if chunk_data is not None:
+                            if not results[chunk_offset].done():
+                                results[chunk_offset].set_result(chunk_data)
+                            continue
+                        # ponytail: both attempts failed — raise to trigger except
+                        raise RuntimeError(
+                            f"Bot {c_idx} failed chunk {chunk_offset} after retry"
+                        )
                     except (FileReferenceInvalid, FileReferenceExpired):
                         logger.warning("Bot %d: file reference expired for chunk %d", c_idx, chunk_offset)
                         try:
@@ -892,6 +903,11 @@ async def worker(worker_id: int):
                                 logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                     except Exception as e:
                         logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
+                        # ponytail: abort stream instead of hanging on unresolved future
+                        if not results[chunk_offset].done():
+                            results[chunk_offset].set_exception(
+                                RuntimeError(f"Bot {c_idx} failed chunk {chunk_offset}")
+                            )
                     task_queue.task_done()
             pool.report_success(c_idx)
     except ClientPoolEmpty:

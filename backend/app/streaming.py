@@ -594,6 +594,8 @@ async def parallel_stream_generator(
     _cdn_session = None
     _cdn_location = None
     _cdn_bot = None
+    _cdn_failures = 0  # consecutive CDN transport failures — disables CDN at 2
+    MAX_CDN_FAILURES = 2  # auto-disable CDN after this many consecutive transport errors
     _cdn_refresh_lock = asyncio.Lock()
     _cdn_init_lock = asyncio.Lock()
 
@@ -637,7 +639,12 @@ async def parallel_stream_generator(
 
     async def _fetch_batch_cdn(batch_start, batch_end):
         """Fetch batch via CDN session with lazy init and bot rotation on transport error."""
-        nonlocal _cdn_session, _cdn_location, _cdn_bot
+        nonlocal _cdn_session, _cdn_location, _cdn_bot, _cdn_failures
+
+        # After MAX_CDN_FAILURES consecutive transport errors, skip CDN entirely
+        # since rotating bots on the same egress IP doesn't help
+        if _cdn_failures >= MAX_CDN_FAILURES:
+            return None
         sess, loc = await _ensure_cdn_session()
         if sess is None or loc is None:
             return None
@@ -691,8 +698,13 @@ async def parallel_stream_generator(
                 await _backpressure.acquire()
                 current += 1
         except (ConnectionError, OSError, TimeoutError) as e:
-            logger.warning("CDN transport error: %s, rotating bot", e)
-            _rotate_cdn_bot()
+            _cdn_failures += 1
+            logger.warning("CDN transport error (#%d): %s", _cdn_failures, e)
+            if _cdn_failures < MAX_CDN_FAILURES:
+                _rotate_cdn_bot()
+            else:
+                _cdn_session = None  # free media session resources
+                logger.info("CDN disabled after %d failures, using stream_media only", _cdn_failures)
             return None
         except Exception as e:
             logger.warning("CDN session error: %s, fallback to stream_media", e)
@@ -861,7 +873,7 @@ async def parallel_stream_generator(
     # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
     # 300 MB window + 200 MB cache = 500 MB peak per stream.
     # 5 concurrent: 5 × 500 = 2.5 GB (16% of 16 GB).
-    WINDOW_CHUNKS = 300
+    WINDOW_CHUNKS = 100
     _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
 
     # Launch workers
@@ -875,7 +887,7 @@ async def parallel_stream_generator(
     # batch-to-batch jitter (flood waits, slow DC) without client-side
     # rebuffering. Set low (5) to avoid 10s TTFB from Telegram DC init;
     # 5 chunks arrive progressively within the first batch fetch (~3s).
-    MIN_PREBUFFER = 5
+    MIN_PREBUFFER = 2
     prebuffer_n = min(MIN_PREBUFFER, total_chunks)
     if prebuffer_n > 1:
         prebuffer_futs = [

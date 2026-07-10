@@ -932,9 +932,10 @@ async def parallel_stream_generator(
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
             del results[chunk_idx]
     finally:
-        # Cancel workers first, then clear results (avoids KeyError race)
+        # Cancel workers, await drain, then clear results (avoids "Task destroyed but pending")
         for w in worker_tasks:
             w.cancel()
+        await asyncio.gather(*worker_tasks, return_exceptions=True)
         results.clear()
         _forward_streams.pop(message_id, None)
         # Schedule restart when no streams remain — frees page cache

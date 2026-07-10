@@ -4,6 +4,7 @@ File management API endpoints.
 from typing import Optional
 from fastapi import APIRouter, Depends, HTTPException, Query
 import secrets
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete, update
 from sqlalchemy.orm import selectinload
@@ -261,36 +262,52 @@ async def update_progress(
     if not file:
         raise HTTPException(status_code=404, detail="File not found")
         
-    # Get or create progress
+    # ponytail: upsert -- SELECT first, INSERT on miss, catch race-condition IntegrityError on commit
+    duration_val = int(progress.duration) if progress.duration else None
+    is_completed = progress.completed if progress.completed is not None else (
+        progress.position >= duration_val if duration_val else False
+    )
     result = await db.execute(
         select(WatchProgress).where(WatchProgress.file_id == file_id, WatchProgress.user_id == current_user.id)
     )
     watch_progress = result.scalar_one_or_none()
-    
-    if not watch_progress:
-        duration_val = int(progress.duration) if progress.duration else None
-        is_completed = progress.completed if progress.completed is not None else (
-            progress.position >= duration_val if duration_val else False
-        )
-        watch_progress = WatchProgress(
-            user_id=current_user.id,
-            file_id=file_id,
-            position=progress.position,
-            duration=duration_val,
-            completed=is_completed
-        )
-        db.add(watch_progress)
-    else:
+    if watch_progress:
         watch_progress.position = progress.position
         if progress.duration:
             watch_progress.duration = int(progress.duration)
         if progress.completed is not None:
             watch_progress.completed = progress.completed
-        elif (progress.duration and progress.position >= int(progress.duration)) \
-             or (watch_progress.duration and progress.position >= watch_progress.duration):
+        elif ((progress.duration and progress.position >= int(progress.duration))
+              or (watch_progress.duration and progress.position >= watch_progress.duration)):
             watch_progress.completed = True
-         
-    await db.commit()
+        await db.commit()
+    else:
+        watch_progress = WatchProgress(
+            user_id=current_user.id,
+            file_id=file_id,
+            position=progress.position,
+            duration=duration_val,
+            completed=is_completed,
+        )
+        db.add(watch_progress)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            result = await db.execute(
+                select(WatchProgress).where(WatchProgress.file_id == file_id, WatchProgress.user_id == current_user.id)
+            )
+            watch_progress = result.scalar_one_or_none()
+            if watch_progress:
+                watch_progress.position = progress.position
+                if progress.duration:
+                    watch_progress.duration = int(progress.duration)
+                if progress.completed is not None:
+                    watch_progress.completed = progress.completed
+                elif ((progress.duration and progress.position >= int(progress.duration))
+                      or (watch_progress.duration and progress.position >= watch_progress.duration)):
+                    watch_progress.completed = True
+                await db.commit()
     await db.refresh(watch_progress)
     return watch_progress
 

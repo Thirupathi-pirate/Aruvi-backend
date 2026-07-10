@@ -166,13 +166,35 @@ async def reconnect_client(client: Client) -> bool:
 
 
 async def start_telegram_client():
-    """Called from app lifespan — starts main bot in background, helpers in background.
-    
-    Server starts immediately even if Telegram DC is unreachable.
+    """Called from app lifespan — starts main bot and warms DC before returning.
+
+    The server will NOT yield until the main bot is connected and has
+    established a connection to the storage channel DC. This eliminates
+    the 5-7s Telegram DC auth init on the first user request (cold start).
+    Helper bots continue starting in background.
     Returns the background task so the caller can cancel it on shutdown.
     """
-    asyncio.create_task(start_one_client(0, clients[0]))
-    diag_log("Client 0 starting in background — app is ready to serve")
+    # Await main bot connection so DC is warm for streaming
+    await start_one_client(0, clients[0])
+
+    # Force DC connection by fetching one message from storage channel
+    channel_id = settings.telegram_storage_channel_id
+    if channel_id and clients[0].is_connected:
+        try:
+            msg = await asyncio.wait_for(
+                clients[0].get_messages(channel_id, 1),
+                timeout=15
+            )
+            if msg:
+                diag_log(f"Main bot DC warmed — message {msg.id} fetched from channel")
+            else:
+                diag_log("Main bot DC warmup: channel returned empty")
+        except Exception as e:
+            diag_log(f"Main bot DC warmup failed: {e}")
+    else:
+        diag_log("Main bot DC warmup skipped (no channel or not connected)")
+
+    # Fire helpers in background (non-blocking)
     task = asyncio.create_task(_finish_startup())
     return task
 

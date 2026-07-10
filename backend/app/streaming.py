@@ -557,6 +557,7 @@ async def parallel_stream_generator(
     _cancel_restart()
 
     # Register forward stream for monitor (done futures = prebuffer depth)
+    _backpressure = asyncio.Semaphore(100)  # ponytail: per-stream, not global
     _forward_streams[message_id] = {"chat_id": chat_id, "results": results, "total_chunks": total_chunks, "updated_at": time.monotonic()}
 
     # Check backward cache — pre-set futures for already-cached chunks
@@ -880,12 +881,6 @@ async def parallel_stream_generator(
         except asyncio.TimeoutError:
             logger.error("Worker %d: timed out waiting for client", worker_id)
 
-    # ── Backpressure: cap in-flight resolved chunks ─────────────────
-    # At most WINDOW_CHUNKS chunks can be resolved but not yet yielded.
-    # 300 MB window + 200 MB cache = 500 MB peak per stream.
-    # 5 concurrent: 5 × 500 = 2.5 GB (16% of 16 GB).
-    WINDOW_CHUNKS = 100
-    _backpressure = asyncio.Semaphore(WINDOW_CHUNKS)
 
     # Launch workers
     worker_tasks = [

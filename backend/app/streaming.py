@@ -34,10 +34,10 @@ def _get_upload_location(file_id_obj, thumb_size=""):
 class ChunkCache:
     """Per-video FIFO cache for already-yielded chunks (backward seek support).
     Key: chunk_idx -> bytes
-    Max size: 256MB per video, evicts oldest entries when full.
+Max size: 2GB per video, evicts oldest entries when full.
     Notifies parent CacheManager for global budget enforcement.
     """
-    def __init__(self, max_bytes: int = 256 * 1024 * 1024, parent=None):
+    def __init__(self, max_bytes: int = 2 * 1024 * 1024 * 1024, parent=None):
         self._data: dict[int, bytes] = {}
         self._order: list[int] = []
         self._size = 0
@@ -102,10 +102,10 @@ class ChunkCache:
 
 class CacheManager:
     """Manages per-video ChunkCache instances with global budget.
-    Each (chat_id, message_id) pair gets its own 256MB FIFO cache.
+    Each (chat_id, message_id) pair gets its own 2GB FIFO cache.
     Total across all caches capped at 3GB; evicts largest cache when exceeded.
     """
-    def __init__(self, per_video_max: int = 256 * 1024 * 1024, max_total: int = 3 * 1024 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 2 * 1024 * 1024 * 1024, max_total: int = 3 * 1024 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
         self._max_total = max_total
@@ -786,11 +786,9 @@ async def parallel_stream_generator(
         except Exception:
             return None
 
-_chunk_retries: dict[int, int] = {}
 
 async def worker(worker_id: int):
     pool = get_client_pool()
-    failed_chunks: list[int] = []
     try:
         async with pool.use_client() as (client, c_idx):
             if c_idx == 0:
@@ -850,14 +848,8 @@ async def worker(worker_id: int):
                     task_queue.task_done()
                     continue
 
-                # ponytail: individual retries capped at 3 per chunk; re-queued for other bots
+                # Fallback: fetch each chunk individually
                 for chunk_offset in range(batch_start, batch_end + 1):
-                    retry_count = _chunk_retries.get(chunk_offset, 0)
-                    if retry_count >= 3:
-                        if not results[chunk_offset].done():
-                            logger.warning("Chunk %d failed after 3 retries, emitting empty", chunk_offset)
-                            results[chunk_offset].set_result(b"")
-                        continue
                     try:
                         chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
                         if chunk_data is not None:
@@ -900,17 +892,8 @@ async def worker(worker_id: int):
                                 logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                     except Exception as e:
                         logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                    failed_chunks.append(chunk_offset)
-                task_queue.task_done()
-                pool.report_success(c_idx)
-
-            if failed_chunks:
-                for chunk_offset in failed_chunks:
-                    _chunk_retries[chunk_offset] = _chunk_retries.get(chunk_offset, 0) + 1
-                for chunk_offset in failed_chunks:
-                    if _chunk_retries[chunk_offset] < 3 and not results[chunk_offset].done():
-                        task_queue.put_nowait((chunk_offset, chunk_offset))
-                logger.info("Worker %d (bot %d): re-queued %d failed chunks", worker_id, c_idx, len(failed_chunks))
+                    task_queue.task_done()
+            pool.report_success(c_idx)
     except ClientPoolEmpty:
         logger.error("Worker %d: no connected client available", worker_id)
     except asyncio.TimeoutError:

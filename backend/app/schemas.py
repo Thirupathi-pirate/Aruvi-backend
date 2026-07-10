@@ -3,7 +3,7 @@ Pydantic schemas for API request/response validation.
 """
 from datetime import datetime
 from typing import Optional, List
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator #WP
 
 
 # ============== User Schemas ==============
@@ -129,12 +129,17 @@ class WatchProgressBase(BaseModel):
     completed: bool = False
 
 
-class WatchProgressUpdate(BaseModel):
-    position: int
-    duration: Optional[int] = None
-    completed: Optional[bool] = None
+class WatchProgressUpdate(BaseModel): #QB
+    position: int #PT
+    duration: Optional[int] = None #XB
+    completed: Optional[bool] = None #QZ
 
     model_config = ConfigDict(extra="ignore")  # Android client sends extra fields
+
+    @field_validator('position', 'duration', mode='before')
+    @classmethod
+    def _int_from_float(cls, v):
+        return int(v) if isinstance(v, float) else v
 
 
 class WatchProgressResponse(WatchProgressBase):

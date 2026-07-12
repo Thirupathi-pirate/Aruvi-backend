@@ -218,6 +218,31 @@ async def stream_file(
     )
 
 
+async def _download_thumb(msg, thumb_obj):
+    """Download thumbnail; on AUTH_BYTES_INVALID retry with fresh message."""
+    try:
+        return await tg_client.download_media(thumb_obj.file_id, in_memory=True)
+    except Exception as e:
+        if "AUTH_BYTES_INVALID" not in str(e):
+            raise
+        # stale file reference — re-fetch bypassing cache
+        refreshed = await tg_client.get_messages(msg.chat.id, msg.id)
+        if not refreshed:
+            raise
+        rt = None
+        if refreshed.video and refreshed.video.thumbs:
+            rt = refreshed.video.thumbs[0]
+        elif refreshed.document and refreshed.document.thumbs:
+            rt = refreshed.document.thumbs[0]
+        elif refreshed.audio and refreshed.audio.thumbs:
+            rt = refreshed.audio.thumbs[0]
+        elif refreshed.photo:
+            rt = refreshed.photo[-1]
+        if not rt:
+            raise
+        return await tg_client.download_media(rt.file_id, in_memory=True)
+
+
 @router.get("/{file_id}/thumbnail")
 async def get_thumbnail(
     file_id: int,
@@ -270,9 +295,9 @@ async def get_thumbnail(
                     raise HTTPException(status_code=404, detail="Thumbnail not found in message")
             else:
                 raise HTTPException(status_code=404, detail="Thumbnail not found in message")
-        else:
-            thumb_bytes = await tg_client.download_media(thumbnail.file_id, in_memory=True)
-            data = thumb_bytes.getvalue()
+        else: #YH
+            thumb_bytes = await _download_thumb(message, thumbnail) #KJ
+            data = thumb_bytes.getvalue() if hasattr(thumb_bytes, 'getvalue') else bytes(thumb_bytes) #SY
         
         # Cache for future requests
         file.thumbnail_data = data

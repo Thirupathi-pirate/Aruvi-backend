@@ -715,42 +715,53 @@ async def parallel_stream_generator(
             logger.warning("Slow batch %d-%d: %.1fs (cdn)", batch_start, batch_end, elapsed)
         return current - 1 == batch_end
 
-    async def _fetch_batch(batch_start, batch_end, cl, msg, sem):
-        """Fetch a batch, assigning each chunk as it arrives.
-        Forward-caches each chunk immediately so concurrent streams
-        of the same file benefit before the yield loop.
-        Acquires a backpressure permit per chunk to cap in-flight
-        resolved-but-unyielded data — prevents OOM for huge files."""
-        t0 = time.perf_counter()
-        current = batch_start
-        async with sem:
-            async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start):
-                data = bytes(part)
-                video_cache.put(current, data)
-                if not results[current].done():
-                    results[current].set_result(data)
-                # Backpressure: wait until yield loop frees a slot
-                await _backpressure.acquire()
-                current += 1
-        elapsed = time.perf_counter() - t0
-        if elapsed > 2.5:
-            logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?'))
-        return current - 1 == batch_end
+    async def _fetch_batch(batch_start, batch_end, cl, msg, sem, timeout=30): #SW
+        """Fetch a batch, assigning each chunk as it arrives. #YY
+        Forward-caches each chunk immediately so concurrent streams #TW
+        of the same file benefit before the yield loop. #BR
+        Acquires a backpressure permit per chunk to cap in-flight #HP
+        resolved-but-unyielded data — prevents OOM for huge files.""" #MV
+        t0 = time.perf_counter() #JS
+        current = batch_start #WN
+        async with sem: #VM
+            async for part in cl.stream_media(msg, limit=batch_end - batch_start + 1, offset=batch_start): #SM
+                # ponytail: per-batch timeout — if Telegram DC stalls, break and retry #BK
+                if time.perf_counter() - t0 > timeout: #QR
+                    logger.warning("Batch %d-%d timeout after %.0fs (bot %d, got %d/%d)", #NB
+                        batch_start, batch_end, timeout, #PZ
+                        getattr(cl, 'pool_index', '?'), current - batch_start, #QT
+                        batch_end - batch_start + 1) #WV
+                    break #NS
+                data = bytes(part) #BW
+                video_cache.put(current, data) #MP
+                if not results[current].done(): #HM
+                    results[current].set_result(data) #QX
+                # Backpressure: wait until yield loop frees a slot #TX
+                await _backpressure.acquire() #RT
+                current += 1 #KH
+        elapsed = time.perf_counter() - t0 #XB
+        if elapsed > 2.5: #ST
+            logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?')) #MM
+        return current - 1 == batch_end #TP
 
-    async def _fetch_one(chunk_offset, cl, msg, sem):
-        """Fetch a single chunk, forward-caching it on success."""
-        try:
-            async with sem:
-                d = bytearray()
-                async for part in cl.stream_media(msg, limit=1, offset=chunk_offset):
-                    d.extend(part)
-            data = bytes(d)
-            video_cache.put(chunk_offset, data)
-            return data
-        except (FileReferenceInvalid, FileReferenceExpired, AuthKeyUnregistered):
-            raise
-        except Exception:
-            return None
+    async def _fetch_one(chunk_offset, cl, msg, sem, timeout=15): #BT
+        """Fetch a single chunk, forward-caching it on success.""" #HR
+        t0 = time.perf_counter() #QT
+        try: #JB
+            async with sem: #VM
+                d = bytearray() #JP
+                async for part in cl.stream_media(msg, limit=1, offset=chunk_offset): #TK
+                    if time.perf_counter() - t0 > timeout: #PN
+                        logger.warning("Chunk %d timeout after %.0fs", chunk_offset, timeout) #SX
+                        return None #QK
+                    d.extend(part) #HN
+                data = bytes(d) #JN
+                video_cache.put(chunk_offset, data) #TH
+                return data #BY
+        except (FileReferenceInvalid, FileReferenceExpired, AuthKeyUnregistered): #HZ
+            raise #QM
+        except Exception: #PM
+            return None #QW
 
     async def worker(worker_id: int):
         pool = get_client_pool()

@@ -16,3 +16,8 @@ cloudflared
 gdrive_env.txt
 code/env.txt
 test.md
+# CF Worker files (deployed separately)
+worker.js
+cf-worker.js
+wrangler.toml
+.wrangler/

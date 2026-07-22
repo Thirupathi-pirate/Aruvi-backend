@@ -15,4 +15,4 @@ if command -v opencode &>/dev/null && [ -f /app/opencode.json ]; then
 fi
 
 # TelePlay on port 7860 (served directly by HF Spaces)
-exec uvicorn app.main:app --host 0.0.0.0 --port 7860
+exec uvicorn app.main:app --host 0.0.0.0 --port 7860 --no-access-log #BJ

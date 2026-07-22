@@ -7,6 +7,7 @@ import itertools
 import re
 import time
 import logging
+from collections import deque
 from typing import AsyncGenerator
 from contextlib import asynccontextmanager
 
@@ -34,11 +35,11 @@ def _get_upload_location(file_id_obj, thumb_size=""):
 class ChunkCache:
     """Per-video FIFO cache for already-yielded chunks (backward seek support).
     Key: chunk_idx -> bytes
-    Max size: 1GB per video, evicts oldest entries when full.
+    Max size: 2GB per video, evicts oldest entries when full.
     """
-    def __init__(self, max_bytes: int = 1024 * 1024 * 1024):
+    def __init__(self, max_bytes: int = 2 * 1024 * 1024 * 1024):
         self._data: dict[int, bytes] = {}
-        self._order: list[int] = []
+        self._order: deque[int] = deque()
         self._size = 0
         self._max = max_bytes
         self._hits = 0
@@ -60,7 +61,7 @@ class ChunkCache:
         self._order.append(key)
         self._size += len(data)
         while self._size > self._max and self._order:
-            old_key = self._order.pop(0)
+            old_key = self._order.popleft()
             old_data = self._data.pop(old_key, None)
             if old_data:
                 self._size -= len(old_data)
@@ -93,10 +94,10 @@ class ChunkCache:
 
 class CacheManager:
     """Manages per-video ChunkCache instances.
-    Each (chat_id, message_id) pair gets its own 1GB FIFO cache,
+    Each (chat_id, message_id) pair gets its own 2GB FIFO cache,
     so concurrent streams don't evict each other's backward seek data.
     """
-    def __init__(self, per_video_max: int = 1024 * 1024 * 1024):
+    def __init__(self, per_video_max: int = 2 * 1024 * 1024 * 1024):
         self._caches: dict[tuple[int, int], ChunkCache] = {}
         self._per_video_max = per_video_max
 
@@ -185,7 +186,7 @@ def _do_restart():
     freed = _cache_manager.clear_all()
     logger.warning("No active streams — cleared %.1f MB from cache", freed / 1024 / 1024)
 
-def _schedule_restart(delay: float = 15.0):
+def _schedule_restart(delay: float = 900.0):
     global _pending_restart
     _cancel_restart()
     loop = asyncio.get_running_loop()
@@ -557,7 +558,7 @@ async def parallel_stream_generator(
     _cancel_restart()
 
     # Register forward stream for monitor (done futures = prebuffer depth)
-    _backpressure = asyncio.Semaphore(100)  # ponytail: per-stream, not global
+    _backpressure = asyncio.Semaphore(2000)  # ponytail: per-stream, not global
     _forward_streams[message_id] = {"chat_id": chat_id, "results": results, "total_chunks": total_chunks, "updated_at": time.monotonic()}
 
     # Check backward cache — pre-set futures for already-cached chunks
@@ -745,24 +746,25 @@ async def parallel_stream_generator(
             logger.warning("Slow batch %d-%d: %.1fs (bot %d)", batch_start, batch_end, elapsed, getattr(cl, 'pool_index', '?')) #MM
         return current - 1 == batch_end #TP
 
-    async def _fetch_one(chunk_offset, cl, msg, sem, timeout=15): #BT
-        """Fetch a single chunk, forward-caching it on success.""" #HR
-        t0 = time.perf_counter() #QT
-        try: #JB
-            async with sem: #VM
-                d = bytearray() #JP
-                async for part in cl.stream_media(msg, limit=1, offset=chunk_offset): #TK
-                    if time.perf_counter() - t0 > timeout: #PN
-                        logger.warning("Chunk %d timeout after %.0fs", chunk_offset, timeout) #SX
-                        return None #QK
-                    d.extend(part) #HN
-                data = bytes(d) #JN
-                video_cache.put(chunk_offset, data) #TH
-                return data #BY
-        except (FileReferenceInvalid, FileReferenceExpired, AuthKeyUnregistered): #HZ
-            raise #QM
-        except Exception: #PM
-            return None #QW
+    async def _fetch_one(chunk_offset, cl, msg, sem, timeout=15, backpressure=None): #ZT #BT #YM
+        """Fetch a single chunk, forward-caching it on success. Stops after timeout.""" #HH #HR #JX
+        t0 = time.perf_counter() #QT #NV
+        try: #JB #BH
+            async with sem: #VM #VH
+                d = bytearray() #JP #SV
+                async for part in cl.stream_media(msg, limit=1, offset=chunk_offset): #TK #WX
+                    if time.perf_counter() - t0 > timeout: #PN #BV
+                        logger.warning("Chunk %d timeout after %.0fs", chunk_offset, timeout) #SX #HM
+                        return None #QK #MY
+                    d.extend(part) #HN #NY
+                data = bytes(d) #JN #KZ
+                video_cache.put(chunk_offset, data) #TH #QN
+                if backpressure: await backpressure.acquire() #SV
+                return data #BY #KS
+        except (FileReferenceInvalid, FileReferenceExpired, AuthKeyUnregistered): #HZ #VN
+            raise #QM #ZM
+        except Exception: #PM #SH
+            return None #QW #YH
 
     async def worker(worker_id: int):
         pool = get_client_pool()
@@ -789,7 +791,7 @@ async def parallel_stream_generator(
                         for chunk_offset in range(batch_start, batch_end + 1):
                             if not results[chunk_offset].done():
                                 results[chunk_offset].set_result(b"")
-                            task_queue.task_done()
+                        task_queue.task_done()
                     return
 
                 # Get semaphore for this client to ensure we don't exceed max_concurrent_transmissions
@@ -832,8 +834,10 @@ async def parallel_stream_generator(
 
                     # Fallback: fetch each chunk individually
                     for chunk_offset in range(batch_start, batch_end + 1):
+                        if chunk_offset not in results or results[chunk_offset].done(): #MY
+                            continue
                         try:
-                            chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore)
+                            chunk_data = await _fetch_one(chunk_offset, client, local_msg, semaphore, backpressure=_backpressure)
                             if chunk_data is not None:
                                 if not results[chunk_offset].done():
                                     results[chunk_offset].set_result(chunk_data)
@@ -848,6 +852,7 @@ async def parallel_stream_generator(
                                         d.extend(part)
                                 data = bytes(d)
                                 video_cache.put(chunk_offset, data)
+                                await _backpressure.acquire()
                                 if not results[chunk_offset].done():
                                     results[chunk_offset].set_result(data)
                                 continue
@@ -865,6 +870,7 @@ async def parallel_stream_generator(
                                                 d.extend(part)
                                         data = bytes(d)
                                         video_cache.put(chunk_offset, data)
+                                        await _backpressure.acquire()
                                         if not results[chunk_offset].done():
                                             results[chunk_offset].set_result(data)
                                         continue
@@ -874,7 +880,7 @@ async def parallel_stream_generator(
                                     logger.error("Bot %d: reconnect failed for chunk %d", c_idx, chunk_offset)
                         except Exception as e:
                             logger.error("Bot %d failed chunk %d: %s", c_idx, chunk_offset, e)
-                        task_queue.task_done()
+                    task_queue.task_done()
                 pool.report_success(c_idx)
         except ClientPoolEmpty:
             logger.error("Worker %d: no connected client available", worker_id)
@@ -932,11 +938,11 @@ async def parallel_stream_generator(
             yield chunk_data
             # Release backpressure permit — next in-flight chunk may resolve
             _backpressure.release()
+            del results[chunk_idx] #PJ
             # Refresh forward stream timestamp every 100 chunks
             if offset % 100 == 0:
                 if message_id in _forward_streams:
                     _forward_streams[message_id]["updated_at"] = time.monotonic()
-            del results[chunk_idx]
     finally:
         # Cancel workers, await drain, then clear results (avoids "Task destroyed but pending")
         for w in worker_tasks:

@@ -286,8 +286,8 @@ if not logger.handlers:
 _client_semaphores = {}
 
 # Limit total concurrent streams to prevent OOM from prebuffers stacking.
-# Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield.
-# With LIMIT=10, max in-flight = 10 × 2 GB = 20 GB, within 3 GB cgroup with OOM guard.
+# Each stream can hold up to 2000 resolved 1 MB chunks (2 GB) awaiting yield. Workers fill ahead of the yield loop.
+# With LIMIT=5, max in-flight = 5 × 2 GB = 10 GB, within 16 GB machine.
 _stream_semaphore = asyncio.Semaphore(5)
 class ClientPoolEmpty(Exception):
     """No connected client available in the pool."""

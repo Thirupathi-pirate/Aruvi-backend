@@ -319,7 +319,8 @@ async def upload_streaming(
         try:
             await asyncio.gather(*tasks)
         finally:
-            os.close(fd)
+            if fd is not None:
+                os.close(fd)
 
         if dlerr:
             raise dlerr

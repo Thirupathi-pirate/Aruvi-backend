@@ -144,6 +144,7 @@ class WatchProgressUpdate(BaseModel): #QB
 
 class WatchProgressResponse(WatchProgressBase):
     id: int
+    user_id: int
     file_id: int
     updated_at: datetime
     

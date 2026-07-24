@@ -11,7 +11,7 @@ from sqlalchemy.orm import selectinload
 
 from ..database import get_db
 from ..models import File, Folder, User, WatchProgress
-from ..schemas import FileResponse, FileListResponse, FileUpdate, WatchProgressUpdate, BatchMoveRequest
+from ..schemas import FileResponse, FileListResponse, FileUpdate, WatchProgressUpdate, WatchProgressResponse, BatchMoveRequest
 from ..auth import get_current_user
 from ..telegram import delete_from_storage_channel, invalidate_message_cache, invalidate_message_cache_batch
 from ..config import get_settings
@@ -312,7 +312,7 @@ async def update_progress(
     return watch_progress
 
 
-@router.get("/{file_id}/progress")
+@router.get("/{file_id}/progress", response_model=WatchProgressResponse | None)
 async def get_progress(
     file_id: int,
     db: AsyncSession = Depends(get_db),
@@ -321,20 +321,12 @@ async def get_progress(
     """Get watch progress for a file."""
     result = await db.execute(
         select(WatchProgress).where(
-            WatchProgress.file_id == file_id, 
+            WatchProgress.file_id == file_id,
             WatchProgress.user_id == current_user.id
         )
     )
     progress = result.scalar_one_or_none()
-    
-    if not progress:
-        return {"position": 0, "duration": 0, "completed": False}
-    
-    return {
-        "position": progress.position,
-        "duration": progress.duration or 0,
-        "completed": progress.completed
-    }
+    return progress
 
 
 @router.post("/{file_id}/share", response_model=FileResponse)
